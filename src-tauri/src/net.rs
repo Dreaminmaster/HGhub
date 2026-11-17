@@ -446,9 +446,27 @@ pub async fn diagnose() -> Value {
         }),
     };
 
+    // 首页 HTTP 200 并不等于内容接口正常；额外检测匿名列表的真实 API。
+    // 使用用户选中的主线路，诊断不自动代替主线路，最长耗时 12 秒。
+    let api_started = Instant::now();
+    let api_result = tokio::time::timeout(
+        Duration::from_secs(12),
+        edge_once(&cur, "GET", "/api/videos?page=1&size=1", None, None)
+    ).await;
+    let api_check = match api_result {
+        Ok(Ok(_)) => json!({"ok":true, "ms":api_started.elapsed().as_millis() as u64}),
+        Ok(Err(error)) => json!({
+            "ok":false, "ms":api_started.elapsed().as_millis() as u64,
+            "error_kind":crate::playback_log::error_kind(&error),
+        }),
+        Err(_) => json!({"ok":false, "ms":api_started.elapsed().as_millis() as u64, "error_kind":"timeout"}),
+    };
+
     json!({
         "base": cur,
         "host": host,
+        "api": api_check,
+        "auto_line_recovery": "仅匿名 GET 遇到网络或临时网关故障时尝试两条内置固定线路",
         "proxy": {
             "mode": proxy_state()["mode"],
             "address": PROXY_SETTINGS.read().ok().and_then(|p|
@@ -554,8 +572,90 @@ fn edge_redirect_target(
     network_policy::redirect_target(current, location)
 }
 
-/// 业务请求：走边缘信封。
+/// 只有这两条源代码内置的固定线路可以互为备用。不读取第三方发布页作自动跳转。
+fn automatic_backup(origin: &str) -> Option<&'static str> {
+    match origin {
+        "https://huangguoai.com" => Some("https://huangguoai.ai"),
+        "https://huangguoai.ai" => Some("https://huangguoai.com"),
+        _ => None,
+    }
+}
+
+/// 仅网络或临时网关故障可触发备用，不把鉴权失败、业务错误或 TLS 证书拒绝当作“被屏蔽”。
+fn temporary_route_error(error: &str) -> bool {
+    if let Some(status) = error.strip_prefix("HTTP ")
+        .and_then(|v| v.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|v| v.parse::<u16>().ok()) {
+        return matches!(status, 408 | 502 | 503 | 504 | 520..=524);
+    }
+    let msg = error.to_ascii_lowercase();
+    if msg.contains("certificate")
+        || msg.contains("tls")
+        || msg.contains("ssl")
+        || msg.contains("authorization")
+        || msg.contains("401")
+        || msg.contains("403")
+        || msg.contains("forbidden")
+        || error.contains("禁止")
+        || error.contains("拒绝")
+    {
+        return false;
+    }
+    ["dns", "connect", "connection", "network", "timeout", "timed out", "tunnel"]
+        .iter().any(|key| msg.contains(key))
+        || error.contains("解析失败")
+        || error.contains("解析超时")
+        || error.contains("网络超时")
+        || error.contains("连接超时")
+}
+
+fn may_recover_with_backup(
+    origin: &str, method: &str, has_body: bool, has_token: bool, error: &str,
+) -> bool {
+    automatic_backup(origin).is_some()
+        && method.eq_ignore_ascii_case("GET")
+        && !has_body && !has_token
+        && temporary_route_error(error)
+}
+
+/// 默认自动恢复：匿名读取固定来源失败时，尝试另一条内置固定线路。
+/// 不更改用户选择的线路或本地登录会话，不携带账号、Bearer token 或写入请求。
 pub async fn edge(
+    origin: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    token: Option<&str>,
+) -> Result<Value, String> {
+    let first = edge_once(origin, method, path, body.clone(), token).await;
+    match first {
+        Err(first_error) if may_recover_with_backup(origin, method, body.is_some(), token.is_some(), &first_error) => {
+            let backup = automatic_backup(origin).expect("经过备用线路白名单验证");
+            crate::playback_log::record("api.trusted_fallback", json!({
+                "operation": edge_operation(path), "from": origin, "to": backup,
+            }));
+            match edge_once(backup, method, path, body, None).await {
+                Ok(value) => {
+                    crate::playback_log::record("api.trusted_fallback_success", json!({
+                        "operation": edge_operation(path), "source": backup,
+                    }));
+                    Ok(value)
+                }
+                Err(_) => {
+                    crate::playback_log::record("api.trusted_fallback_failed", json!({
+                        "operation": edge_operation(path),
+                    }));
+                    // 避免把备用站点的未知错误覆盖到用户实际选择的线路。
+                    Err(first_error)
+                }
+            }
+        }
+        other => other,
+    }
+}
+
+/// 业务请求：单条线路走边缘信封。
+async fn edge_once(
     origin: &str,
     method: &str,
     path: &str,
@@ -878,6 +978,24 @@ mod tests {
         }
         assert!(edge_redirect_target(&current, 301, "http://example.com/", true).is_err());
         assert!(edge_redirect_target(&current, 301, "https://127.0.0.1/", true).is_err());
+    }
+
+    #[test]
+    fn auto_recovery_only_allows_anonymous_read_on_trusted_fixed_sources() {
+        assert_eq!(automatic_backup("https://huangguoai.ai"), Some("https://huangguoai.com"));
+        assert_eq!(automatic_backup("https://huangguoai.com"), Some("https://huangguoai.ai"));
+        assert_eq!(automatic_backup("https://unknown.example"), None);
+        assert!(may_recover_with_backup("https://huangguoai.ai", "GET", false, false, "DNS 解析失败"));
+        assert!(may_recover_with_backup("https://huangguoai.ai", "get", false, false, "HTTP 503 Service Unavailable"));
+        assert!(!may_recover_with_backup("https://huangguoai.ai", "GET", false, true, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://huangguoai.ai", "POST", false, false, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://huangguoai.ai", "GET", true, false, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://unknown.example", "GET", false, false, "DNS 解析失败"));
+        for err in ["401", "HTTP 403 Forbidden", "HTTP 404 Not Found", "HTTP 429 Too Many Requests",
+                    "certificate verify failed", "TLS handshake error", "禁止访问内网地址",
+                    "业务接口返回失败"] {
+            assert!(!may_recover_with_backup("https://huangguoai.ai", "GET", false, false, err), "{err}");
+        }
     }
 
     #[test]
