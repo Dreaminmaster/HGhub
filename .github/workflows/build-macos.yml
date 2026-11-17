@@ -13,17 +13,14 @@ concurrency:
 jobs:
   macos:
     name: macOS (${{ matrix.name }})
-    # GitHub 的 macos-latest 目前映射 ARM64（macOS 26）；
-    # Intel 与 Universal 分配独立 Intel runner 池，避免三项全部挤在 ARM 池。
+    # 使用已经实际成功构建 v1.2.4 的 Intel runner 池。
+    # Universal 是包含 Apple Silicon arm64 + Intel x64 的通用安装包；
+    # 不再把发布依赖于一直在排队中取消的独立 ARM64 runner。
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: aarch64-apple-darwin
-            name: Apple Silicon (arm64)
-            arch: arm64
-            runner: macos-15
           - target: x86_64-apple-darwin
             name: Intel (x64)
             arch: x64
@@ -142,9 +139,9 @@ jobs:
             原项目已在 PR #1 完成 macOS 适配支持，但官方尚未在 Release 页面发布 Mac 版产物。
 
             ### 下载说明
-            - **Apple Silicon (M1/M2/M3/M4/M5 系列芯片)**: 推荐下载 `HGhub_${{ steps.ver.outputs.version }}_arm64.dmg`
+            - **Apple Silicon (M1/M2/M3/M4/M5 系列芯片)**: 下载 `HGhub_${{ steps.ver.outputs.version }}_universal.dmg`（包含 arm64）
             - **Intel 芯片**: 推荐下载 `HGhub_${{ steps.ver.outputs.version }}_x64.dmg`
-            - **通用双架构版 (全机型支持)**: 推荐下载 `HGhub_${{ steps.ver.outputs.version }}_universal.dmg`
+            - **Universal 通用双架构版**: `HGhub_${{ steps.ver.outputs.version }}_universal.dmg` 同时支持 Apple Silicon 和 Intel
 
             ### macOS 首次打开说明（绕过未签名提示）
             此安装包采用临时签名（ad-hoc），未经过 Apple 公证。如果 macOS 阻止打开，先确认安装包来自本仓库，然后尝试打开一次，再到「系统设置 → 隐私与安全性」选择「仍要打开」（Open Anyway）。
