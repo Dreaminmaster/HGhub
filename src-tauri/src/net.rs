@@ -318,6 +318,129 @@ fn cached_client(cache: &ClientCache, key: &str, now: Instant) -> Option<Arc<req
         .map(|(_, http)| http.clone())
 }
 
+/// 仅当系统 DNS 明确失败时启用的加密 DNS（DoH），不更改系统网络。
+/// HTTPS 证书仍由 rustls 验证；为解析器使用公开的固定入口 IP 避免递归查询。
+/// 向解析器发送的只有目标主机名，不包含请求路径、Cookie、Token 或账号。
+#[derive(Clone, Copy)]
+struct DohProvider {
+    host: &'static str,
+    url: &'static str,
+    ips: &'static [&'static str],
+}
+
+const DOH_PROVIDERS: [DohProvider; 2] = [
+    DohProvider {
+        host: "cloudflare-dns.com",
+        url: "https://cloudflare-dns.com/dns-query",
+        ips: &["1.1.1.1:443", "1.0.0.1:443"],
+    },
+    DohProvider {
+        host: "dns.google",
+        url: "https://dns.google/resolve",
+        ips: &["8.8.8.8:443", "8.8.4.4:443"],
+    },
+];
+
+/// DoH 不允许将远端解析结果导向私网、回环或特殊地址。
+fn parse_doh_answers(answer: &Value, qtype: u64, port: u16) -> Result<Vec<SocketAddr>, String> {
+    if answer.get("Status").and_then(Value::as_u64) != Some(0) {
+        return Err("加密 DNS 未返回成功状态".to_string());
+    }
+    let mut addrs = Vec::new();
+    if let Some(rows) = answer.get("Answer").and_then(Value::as_array) {
+        if rows.len() > 64 {
+            return Err("加密 DNS 记录数量超出限制".into());
+        }
+        for row in rows {
+            if row.get("type").and_then(Value::as_u64) != Some(qtype) {
+                continue;
+            }
+            let Some(raw_ip) = row.get("data").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Ok(ip) = raw_ip.parse::<std::net::IpAddr>() {
+                if (qtype == 1 && !ip.is_ipv4()) || (qtype == 28 && !ip.is_ipv6()) {
+                    continue;
+                }
+                // 对所有答案执行私网地址检查；不能只挑选其中的公开 IP。
+                if !network_policy::allowed_ip(ip) {
+                    return Err("加密 DNS 返回了不允许的目标地址".into());
+                }
+                addrs.push(SocketAddr::new(ip, port));
+            }
+        }
+    }
+    Ok(addrs)
+}
+
+/// HTTPS DNS 请求独立于业务 HTTP 客户端，不走不可信代理设置。
+/// 每个 DNS 服务分别限制 3 秒，两种记录并行查询；失败才尝试第二个服务。
+async fn doh_query(provider: DohProvider, host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    let endpoints: Vec<SocketAddr> = provider.ips.iter()
+        .filter_map(|raw| raw.parse::<SocketAddr>().ok()).collect();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .resolve_to_addrs(provider.host, &endpoints)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(3))
+        .connect_timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|_| "无法创建加密 DNS 客户端")?;
+    let lookup = |record: &'static str| {
+        let client = client.clone();
+        async move {
+            client.get(provider.url)
+                .query(&[("name", host), ("type", record)])
+                .header(reqwest::header::ACCEPT, "application/dns-json")
+                .send()
+                .await
+                .map_err(|_| "加密 DNS 连接失败".to_string())?
+                .error_for_status()
+                .map_err(|_| "加密 DNS HTTP 错误".to_string())?
+                .json::<Value>()
+                .await
+                .map_err(|_| "加密 DNS 返回无效数据".to_string())
+        }
+    };
+    let (a, aaaa) = tokio::join!(lookup("A"), lookup("AAAA"));
+    let mut results = Vec::new();
+    let mut received = false;
+    for (answer, qtype) in [(a, 1), (aaaa, 28)] {
+        if let Ok(value) = answer {
+            received = true;
+            results.extend(parse_doh_answers(&value, qtype, port)?);
+        }
+    }
+    if !received {
+        return Err("加密 DNS 服务暂时不可达".to_string());
+    }
+    // 与原 DNS 解析路径一致：偏好 IPv6、去重，并整体检查答案。
+    results.sort_unstable_by_key(|addr| (addr.is_ipv4(), *addr));
+    results.dedup();
+    network_policy::check_addresses_with_mode(&results, true)?;
+    Ok(results)
+}
+
+async fn secure_dns_recovery(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    let mut last_error = String::from("加密 DNS 不可达");
+    for provider in DOH_PROVIDERS {
+        match doh_query(provider, host, port).await {
+            Ok(addrs) => {
+                crate::playback_log::record("network.secure_dns_recovery", json!({
+                    "resolver": provider.host, "result_count": addrs.len(),
+                }));
+                return Ok(addrs);
+            }
+            Err(e) => last_error = e,
+        }
+    }
+    Err(last_error)
+}
+
+fn local_dns_failure(error: &str) -> bool {
+    matches!(error, "DNS 解析失败" | "DNS 解析超时" | "目标没有可用的 DNS 地址")
+}
+
 /// 缓存按模式、主机和端口隔离；有效期内仅复用已经检查并固定地址的客户端。
 /// 到期后重新检查全部 DNS 答案，不使用旧连接绕过新的目标检查。
 async fn client_for(raw: &str) -> Result<(url::Url, Arc<reqwest::Client>), String> {
@@ -337,7 +460,22 @@ async fn client_for(raw: &str) -> Result<(url::Url, Arc<reqwest::Client>), Strin
     // 用户显式代理时，由 HTTP CONNECT 代理解析域名，避免本地 DNS 被阻断。
     // 仍由 parse_target_with_mode 阻止字面私网 IP 和内部域名；代理必须可信。
     let addrs = if strict && proxy_url.is_none() {
-        network_policy::resolve_target(&target, strict).await?
+        match network_policy::resolve_target(&target, strict).await {
+            Ok(addrs) => addrs,
+            Err(reason) if local_dns_failure(&reason) && target.scheme() == "https" => {
+                // 本机 DNS 失败后自动查询公开的免费 DoH；证书与安全地址检查不降低。
+                // 仅在域名目标上使用 DoH，字面 IP 和安全拒绝绝不走回退。
+                if target.host().is_some_and(|h| matches!(h, url::Host::Domain(_))) {
+                    match secure_dns_recovery(host, port).await {
+                        Ok(addrs) => addrs,
+                        Err(_) => return Err(reason),
+                    }
+                } else {
+                    return Err(reason);
+                }
+            }
+            Err(reason) => return Err(reason),
+        }
     } else {
         Vec::new()
     };
@@ -1078,6 +1216,21 @@ mod tests {
         assert_eq!(parse_macos_proxy("ProxyAutoConfigEnable : 1\nProxyAutoConfigURLString : https://config.example/pac"), None);
         assert_eq!(parse_macos_proxy("HTTPSEnable : 0\nHTTPSProxy : 127.0.0.1\nHTTPSPort : 7897"), None);
         assert_eq!(parse_macos_proxy("HTTPSEnable : 1\nHTTPSProxy : user:secret@bad.example\nHTTPSPort : 7897"), None);
+    }
+
+    #[test]
+    fn secure_dns_rejects_private_ip_and_mixed_responses() {
+        let valid = json!({"Status":0,"Answer":[{"type":1,"data":"1.2.3.4"}]});
+        assert_eq!(parse_doh_answers(&valid, 1, 443).unwrap(),
+            vec!["1.2.3.4:443".parse::<SocketAddr>().unwrap()]);
+        let bad = json!({"Status":0,"Answer":[
+            {"type":1,"data":"1.2.3.4"}, {"type":1,"data":"127.0.0.1"}
+        ]});
+        assert!(parse_doh_answers(&bad, 1, 443).is_err());
+        assert!(parse_doh_answers(&json!({"Status":3}), 1, 443).is_err());
+        assert!(local_dns_failure("DNS 解析超时"));
+        assert!(!local_dns_failure("禁止访问普通内网、回环或保留地址"));
+        assert!(!local_dns_failure("TLS certificate invalid"));
     }
 
     #[test]
