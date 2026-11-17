@@ -610,15 +610,17 @@ fn temporary_route_error(error: &str) -> bool {
 }
 
 fn may_recover_with_backup(
-    origin: &str, method: &str, has_body: bool, has_token: bool, error: &str,
+    origin: &str, method: &str, path: &str, has_body: bool, has_token: bool, error: &str,
 ) -> bool {
+    // 只读播放地址查询虽然使用 POST，但无副作用（项目原有重试策略已明确）。
+    let safe_read = (method.eq_ignore_ascii_case("GET") && !has_body)
+        || (method.eq_ignore_ascii_case("POST") && edge_operation(path) == "play");
     automatic_backup(origin).is_some()
-        && method.eq_ignore_ascii_case("GET")
-        && !has_body && !has_token
+        && safe_read && !has_token
         && temporary_route_error(error)
 }
 
-/// 默认自动恢复：匿名读取固定来源失败时，尝试另一条内置固定线路。
+/// 默认自动恢复：匿名读取或只读的播放地址查询失败时，尝试另一条内置固定线路。
 /// 不更改用户选择的线路或本地登录会话，不携带账号、Bearer token 或写入请求。
 pub async fn edge(
     origin: &str,
@@ -629,7 +631,7 @@ pub async fn edge(
 ) -> Result<Value, String> {
     let first = edge_once(origin, method, path, body.clone(), token).await;
     match first {
-        Err(first_error) if may_recover_with_backup(origin, method, body.is_some(), token.is_some(), &first_error) => {
+        Err(first_error) if may_recover_with_backup(origin, method, path, body.is_some(), token.is_some(), &first_error) => {
             let backup = automatic_backup(origin).expect("经过备用线路白名单验证");
             crate::playback_log::record("api.trusted_fallback", json!({
                 "operation": edge_operation(path), "from": origin, "to": backup,
@@ -985,16 +987,21 @@ mod tests {
         assert_eq!(automatic_backup("https://huangguoai.ai"), Some("https://huangguoai.com"));
         assert_eq!(automatic_backup("https://huangguoai.com"), Some("https://huangguoai.ai"));
         assert_eq!(automatic_backup("https://unknown.example"), None);
-        assert!(may_recover_with_backup("https://huangguoai.ai", "GET", false, false, "DNS 解析失败"));
-        assert!(may_recover_with_backup("https://huangguoai.ai", "get", false, false, "HTTP 503 Service Unavailable"));
-        assert!(!may_recover_with_backup("https://huangguoai.ai", "GET", false, true, "DNS 解析失败"));
-        assert!(!may_recover_with_backup("https://huangguoai.ai", "POST", false, false, "DNS 解析失败"));
-        assert!(!may_recover_with_backup("https://huangguoai.ai", "GET", true, false, "DNS 解析失败"));
-        assert!(!may_recover_with_backup("https://unknown.example", "GET", false, false, "DNS 解析失败"));
+        let read_path = "/api/videos?page=1&size=1";
+        let playback = "/api/videos/123/episodes/1/playback";
+        assert!(may_recover_with_backup("https://huangguoai.ai", "GET", read_path, false, false, "DNS 解析失败"));
+        assert!(may_recover_with_backup("https://huangguoai.ai", "get", read_path, false, false, "HTTP 503 Service Unavailable"));
+        assert!(may_recover_with_backup("https://huangguoai.ai", "POST", playback, true, false, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://huangguoai.ai", "POST", playback, true, true, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://huangguoai.ai", "GET", read_path, false, true, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://huangguoai.ai", "POST", "/api/videos/123/comments", true, false, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://huangguoai.ai", "POST", "/api/account/loginByPassword", true, false, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://huangguoai.ai", "GET", read_path, true, false, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://unknown.example", "GET", read_path, false, false, "DNS 解析失败"));
         for err in ["401", "HTTP 403 Forbidden", "HTTP 404 Not Found", "HTTP 429 Too Many Requests",
                     "certificate verify failed", "TLS handshake error", "禁止访问内网地址",
                     "业务接口返回失败"] {
-            assert!(!may_recover_with_backup("https://huangguoai.ai", "GET", false, false, err), "{err}");
+            assert!(!may_recover_with_backup("https://huangguoai.ai", "GET", read_path, false, false, err), "{err}");
         }
     }
 
