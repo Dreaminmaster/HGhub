@@ -54,6 +54,18 @@ pub async fn net_diag() -> Result<Value, String> {
     Ok(crate::net::diagnose().await)
 }
 
+/// 当前使用的系统、直接连接或手动 HTTP(S) 代理模式。
+#[tauri::command]
+pub async fn proxy_state() -> Result<Value, String> {
+    Ok(crate::net::proxy_state())
+}
+
+/// 设置可信的 HTTP(S) 代理，不更改已有登录会话。
+#[tauri::command]
+pub async fn proxy_set(mode: String, url: String) -> Result<Value, String> {
+    crate::net::proxy_set(&mode, &url)
+}
+
 /* ───────────────────────── 线路（数据源） ───────────────────────── */
 
 /// 当前线路 + 固定线路清单（镜像线路另外按需拉取）。
