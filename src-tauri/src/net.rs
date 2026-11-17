@@ -195,12 +195,72 @@ fn proxy_override() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// 解析 macOS scutil 的显式 HTTPS/HTTP 系统代理。PAC/WPAD 不解析、不执行。
+fn parse_macos_proxy(text: &str) -> Option<String> {
+    let mut values: HashMap<&str, &str> = HashMap::new();
+    for line in text.lines() {
+        if let Some((key, value)) = line.trim().split_once(" : ") {
+            values.insert(key.trim(), value.trim());
+        }
+    }
+    for (enabled, host_key, port_key) in [
+        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort"),
+        ("HTTPEnable", "HTTPProxy", "HTTPPort"),
+    ] {
+        if values.get(enabled).copied() != Some("1") {
+            continue;
+        }
+        let host = values.get(host_key)?.trim();
+        let port = values.get(port_key)?.parse::<u16>().ok()?;
+        if port == 0 || host.is_empty() {
+            continue;
+        }
+        let address = if host.contains(':') && !host.starts_with('[') {
+            format!("http://[{host}]:{port}")
+        } else {
+            format!("http://{host}:{port}")
+        };
+        if let Ok(valid) = validate_proxy("custom", &address) {
+            return Some(valid.url);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_system_proxy() -> Option<String> {
+    use std::process::Command;
+    let output = Command::new("/usr/sbin/scutil")
+        .arg("--proxy")
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.len() > 32768 {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    parse_macos_proxy(&text)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_system_proxy() -> Option<String> {
+    None
+}
+
+/// macOS 自动复用已启用的系统 HTTP/HTTPS 代理；不猜测未知本地端口。
+fn effective_proxy(config: &ProxySettings) -> Option<String> {
+    match config.mode.as_str() {
+        "direct" => None,
+        "custom" => Some(config.url.clone()),
+        _ => proxy_override().or_else(macos_system_proxy),
+    }
+}
+
 /// 按**当前**系统代理设置新建一个客户端。
 ///
 /// 注意：reqwest 的 `system-proxy` 只在构建时读一次注册表 / 环境变量。代理软件被关掉后，
 /// 旧客户端仍会往 `127.0.0.1:7897` 建隧道，症状是满屏 `tunnel error: failed to create
 /// underlying connection`（浏览器却是通的，因为它每次都重读系统代理）。所以这里允许重建。
-fn build_client(host: &str, addrs: &[SocketAddr], config: &ProxySettings) -> Result<reqwest::Client, String> {
+fn build_client(host: &str, addrs: &[SocketAddr], config: &ProxySettings, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .user_agent(UA)
         .timeout(Duration::from_secs(20))
@@ -215,12 +275,10 @@ fn build_client(host: &str, addrs: &[SocketAddr], config: &ProxySettings) -> Res
     }
     if config.mode == "direct" {
         builder = builder.no_proxy();
-    } else {
-        let p = if config.mode == "custom" { Some(config.url.clone()) } else { proxy_override() };
-        if let Some(url) = p {
-            let proxy = reqwest::Proxy::all(&url).map_err(|_| "代理地址无效（详细信息已隐藏）")?;
-            builder = builder.proxy(proxy);
-        }
+    } else if let Some(proxy_url) = proxy_url {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|_| "代理地址无效（详细信息已隐藏）")?;
+        builder = builder.proxy(proxy);
     }
     builder
         .build()
@@ -246,7 +304,8 @@ async fn client_for(raw: &str) -> Result<(url::Url, Arc<reqwest::Client>), Strin
     let host = target.host_str().ok_or("目标缺少主机名")?;
     let port = target.port_or_known_default().ok_or("目标端口无效")?;
     let config = PROXY_SETTINGS.read().map_err(|_| "网络设置锁失败")?.clone();
-    let key = format!("{strict}:{}:{}:{host}:{port}", config.mode, config.url);
+    let proxy_url = effective_proxy(&config);
+    let key = format!("{strict}:{}:{}:{host}:{port}", config.mode, proxy_url.as_deref().unwrap_or("direct"));
     {
         let cache = CLIENTS.lock().map_err(|_| "HTTP 客户端锁失败")?;
         if let Some(http) = cached_client(&cache, &key, Instant::now()) {
@@ -255,14 +314,12 @@ async fn client_for(raw: &str) -> Result<(url::Url, Arc<reqwest::Client>), Strin
     }
     // 用户显式代理时，由 HTTP CONNECT 代理解析域名，避免本地 DNS 被阻断。
     // 仍由 parse_target_with_mode 阻止字面私网 IP 和内部域名；代理必须可信。
-    let explicit_proxy = config.mode == "custom"
-        || (config.mode == "system" && proxy_override().is_some());
-    let addrs = if strict && !explicit_proxy {
+    let addrs = if strict && proxy_url.is_none() {
         network_policy::resolve_target(&target, strict).await?
     } else {
         Vec::new()
     };
-    let http = Arc::new(build_client(host, &addrs, &config)?);
+    let http = Arc::new(build_client(host, &addrs, &config, proxy_url.as_deref())?);
     let now = Instant::now();
     let mut cache = CLIENTS.lock().map_err(|_| "HTTP 客户端锁失败")?;
     // 同时到达的请求可能已完成解析；不延长已有结果的有效期。
@@ -469,8 +526,10 @@ pub async fn diagnose() -> Value {
         "auto_line_recovery": "仅匿名 GET 遇到网络或临时网关故障时尝试两条内置固定线路",
         "proxy": {
             "mode": proxy_state()["mode"],
-            "address": PROXY_SETTINGS.read().ok().and_then(|p|
-                if p.mode == "custom" { Some(redact_proxy(&p.url)) } else { None }),
+            "address": PROXY_SETTINGS.read().ok().and_then(|p| {
+                let selected = effective_proxy(&p);
+                selected.map(|s| redact_proxy(&s))
+            }),
             "note": "手动代理模式由代理端解析域名，本地 DNS 失败不代表代理失败",
         },
         "dns": dns,
@@ -980,6 +1039,23 @@ mod tests {
         }
         assert!(edge_redirect_target(&current, 301, "http://example.com/", true).is_err());
         assert!(edge_redirect_target(&current, 301, "https://127.0.0.1/", true).is_err());
+    }
+
+    #[test]
+    fn parses_explicit_macos_system_proxy_without_pac() {
+        let enabled = r#"<dictionary> {
+            HTTPEnable : 1
+            HTTPProxy : 127.0.0.1
+            HTTPPort : 7890
+            HTTPSEnable : 1
+            HTTPSProxy : 127.0.0.1
+            HTTPSPort : 7897
+            ProxyAutoConfigEnable : 0
+        }"#;
+        assert_eq!(parse_macos_proxy(enabled).as_deref(), Some("http://127.0.0.1:7897"));
+        assert_eq!(parse_macos_proxy("ProxyAutoConfigEnable : 1\nProxyAutoConfigURLString : https://config.example/pac"), None);
+        assert_eq!(parse_macos_proxy("HTTPSEnable : 0\nHTTPSProxy : 127.0.0.1\nHTTPSPort : 7897"), None);
+        assert_eq!(parse_macos_proxy("HTTPSEnable : 1\nHTTPSProxy : user:secret@bad.example\nHTTPSPort : 7897"), None);
     }
 
     #[test]
