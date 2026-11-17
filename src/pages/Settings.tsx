@@ -145,6 +145,10 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
               <div className="text-[10.5px] text-mut mt-1 leading-relaxed">
                 某些 Wi-Fi 无法连接来源时，可指定已经启动的可信 HTTP 代理；本功能不提供代理服务器，也不会自动切换未知站点。
               </div>
+              <div className="mt-2 rounded-(--r-sm) bg-s3/60 px-3 py-2 text-[10.5px] text-on/80 leading-relaxed">
+                自动恢复已启用：匿名内容请求遇到网络或临时网关故障时，先尝试另一条可信固定线路，无需填写代理。
+                如果两条线路都受限，仍需要系统网络服务或手动代理。
+              </div>
               <div className="grid grid-cols-3 gap-1.5 mt-3">
                 {([
                   ["system", "跟随系统"],
@@ -188,8 +192,17 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
                     setProxyBusy(true);
                     void api.netDiag().then(res => {
                       const http = res.http as { status?: number; error?: string } | undefined;
-                      setProxyResult(http?.status ? "当前线路响应：HTTP " + http.status :
-                        http?.error ? "连接失败：" + http.error : "检测完成");
+                      const checkedApi = res.api as { ok?: boolean; ms?: number; error_kind?: string } | undefined;
+                      if (checkedApi?.ok) {
+                        setProxyResult("真实内容接口正常（" + checkedApi.ms + "ms），首页 HTTP " + (http?.status || "未知"));
+                      } else if (checkedApi) {
+                        setProxyResult("首页 HTTP " + (http?.status || "不可用") +
+                          "；内容接口检测失败（" + (checkedApi.error_kind || "未知错误") +
+                          "）。应用会对匿名读取尝试可信备用线路。");
+                      } else {
+                        setProxyResult(http?.status ? "网站首页响应：HTTP " + http.status :
+                          http?.error ? "连接失败：" + http.error : "检测完成");
+                      }
                     }).catch(e => setProxyResult((e as Error).message || "检测失败"))
                       .finally(() => setProxyBusy(false));
                   }}
