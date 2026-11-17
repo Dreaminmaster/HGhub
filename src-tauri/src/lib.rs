@@ -139,6 +139,8 @@ pub fn run() {
             api::security_set,
             api::debug_log,
             api::net_diag,
+            api::proxy_state,
+            api::proxy_set,
             api::line_state,
             api::line_set,
             api::line_mirrors,
