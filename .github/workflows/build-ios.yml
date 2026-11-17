@@ -9,7 +9,9 @@ on:
 jobs:
   ios:
     name: iOS Build (IPA)
-    runs-on: macos-latest
+    # 同一仓库的 macos-15-intel runner 已成功执行 macOS 完整编译。
+    # 可为 iOS 设备交叉编译 aarch64-apple-ios，避免长期等待 ARM64 macOS runner。
+    runs-on: macos-15-intel
     permissions:
       contents: write
     env:
