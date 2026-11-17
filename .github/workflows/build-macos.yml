@@ -5,10 +5,17 @@ on:
   push:
     branches: ["main"]
 
+# 连续提交时，只保留最新主分支构建，避免排队旧版本占用运行资源。
+concurrency:
+  group: hghub-macos-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   macos:
     name: macOS (${{ matrix.name }})
-    runs-on: macos-latest
+    # GitHub 的 macos-latest 目前映射 ARM64（macOS 26）；
+    # Intel 与 Universal 分配独立 Intel runner 池，避免三项全部挤在 ARM 池。
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -16,12 +23,15 @@ jobs:
           - target: aarch64-apple-darwin
             name: Apple Silicon (arm64)
             arch: arm64
+            runner: macos-15
           - target: x86_64-apple-darwin
             name: Intel (x64)
             arch: x64
+            runner: macos-15-intel
           - target: universal-apple-darwin
             name: Universal (通用版)
             arch: universal
+            runner: macos-15-intel
 
     steps:
       - uses: actions/checkout@v4
