@@ -195,12 +195,94 @@ fn proxy_override() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// 解析 macOS scutil 的显式 HTTPS/HTTP 系统代理。PAC/WPAD 不解析、不执行。
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_proxy(text: &str) -> Option<String> {
+    let mut values: HashMap<&str, &str> = HashMap::new();
+    for line in text.lines() {
+        if let Some((key, value)) = line.trim().split_once(" : ") {
+            values.insert(key.trim(), value.trim());
+        }
+    }
+    for (enabled, host_key, port_key) in [
+        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort"),
+        ("HTTPEnable", "HTTPProxy", "HTTPPort"),
+    ] {
+        if values.get(enabled).copied() != Some("1") {
+            continue;
+        }
+        let Some(host) = values.get(host_key).map(|v| v.trim()) else {
+            continue;
+        };
+        let Some(port) = values.get(port_key).and_then(|v| v.parse::<u16>().ok()) else {
+            continue;
+        };
+        if port == 0 || host.is_empty() {
+            continue;
+        }
+        let address = if host.contains(':') && !host.starts_with('[') {
+            format!("http://[{host}]:{port}")
+        } else {
+            format!("http://{host}:{port}")
+        };
+        if let Ok(valid) = validate_proxy("custom", &address) {
+            return Some(valid.url);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+static MACOS_PROXY_CACHE: Lazy<Mutex<Option<(Instant, Option<String>)>>> =
+    Lazy::new(|| Mutex::new(None));
+
+#[cfg(target_os = "macos")]
+fn macos_system_proxy() -> Option<String> {
+    use std::process::Command;
+    // 不为每个 HLS 分片都启动 scutil；系统代理变化最多约 10 秒内生效。
+    if let Ok(mut cache) = MACOS_PROXY_CACHE.lock() {
+        if let Some((last_checked, result)) = cache.as_ref() {
+            if last_checked.elapsed() < Duration::from_secs(10) {
+                return result.clone();
+            }
+        }
+        let result = Command::new("/usr/sbin/scutil")
+            .arg("--proxy")
+            .output()
+            .ok()
+            .and_then(|output| {
+                if !output.status.success() || output.stdout.len() > 32768 {
+                    return None;
+                }
+                String::from_utf8(output.stdout).ok()
+            })
+            .and_then(|text| parse_macos_proxy(&text));
+        *cache = Some((Instant::now(), result.clone()));
+        return result;
+    }
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_system_proxy() -> Option<String> {
+    None
+}
+
+/// macOS 自动复用已启用的系统 HTTP/HTTPS 代理；不猜测未知本地端口。
+fn effective_proxy(config: &ProxySettings) -> Option<String> {
+    match config.mode.as_str() {
+        "direct" => None,
+        "custom" => Some(config.url.clone()),
+        _ => proxy_override().or_else(macos_system_proxy),
+    }
+}
+
 /// 按**当前**系统代理设置新建一个客户端。
 ///
 /// 注意：reqwest 的 `system-proxy` 只在构建时读一次注册表 / 环境变量。代理软件被关掉后，
 /// 旧客户端仍会往 `127.0.0.1:7897` 建隧道，症状是满屏 `tunnel error: failed to create
 /// underlying connection`（浏览器却是通的，因为它每次都重读系统代理）。所以这里允许重建。
-fn build_client(host: &str, addrs: &[SocketAddr], config: &ProxySettings) -> Result<reqwest::Client, String> {
+fn build_client(host: &str, addrs: &[SocketAddr], config: &ProxySettings, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .user_agent(UA)
         .timeout(Duration::from_secs(20))
@@ -215,12 +297,10 @@ fn build_client(host: &str, addrs: &[SocketAddr], config: &ProxySettings) -> Res
     }
     if config.mode == "direct" {
         builder = builder.no_proxy();
-    } else {
-        let p = if config.mode == "custom" { Some(config.url.clone()) } else { proxy_override() };
-        if let Some(url) = p {
-            let proxy = reqwest::Proxy::all(&url).map_err(|_| "代理地址无效（详细信息已隐藏）")?;
-            builder = builder.proxy(proxy);
-        }
+    } else if let Some(proxy_url) = proxy_url {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|_| "代理地址无效（详细信息已隐藏）")?;
+        builder = builder.proxy(proxy);
     }
     builder
         .build()
@@ -246,7 +326,8 @@ async fn client_for(raw: &str) -> Result<(url::Url, Arc<reqwest::Client>), Strin
     let host = target.host_str().ok_or("目标缺少主机名")?;
     let port = target.port_or_known_default().ok_or("目标端口无效")?;
     let config = PROXY_SETTINGS.read().map_err(|_| "网络设置锁失败")?.clone();
-    let key = format!("{strict}:{}:{}:{host}:{port}", config.mode, config.url);
+    let proxy_url = effective_proxy(&config);
+    let key = format!("{strict}:{}:{}:{host}:{port}", config.mode, proxy_url.as_deref().unwrap_or("direct"));
     {
         let cache = CLIENTS.lock().map_err(|_| "HTTP 客户端锁失败")?;
         if let Some(http) = cached_client(&cache, &key, Instant::now()) {
@@ -255,14 +336,12 @@ async fn client_for(raw: &str) -> Result<(url::Url, Arc<reqwest::Client>), Strin
     }
     // 用户显式代理时，由 HTTP CONNECT 代理解析域名，避免本地 DNS 被阻断。
     // 仍由 parse_target_with_mode 阻止字面私网 IP 和内部域名；代理必须可信。
-    let explicit_proxy = config.mode == "custom"
-        || (config.mode == "system" && proxy_override().is_some());
-    let addrs = if strict && !explicit_proxy {
+    let addrs = if strict && proxy_url.is_none() {
         network_policy::resolve_target(&target, strict).await?
     } else {
         Vec::new()
     };
-    let http = Arc::new(build_client(host, &addrs, &config)?);
+    let http = Arc::new(build_client(host, &addrs, &config, proxy_url.as_deref())?);
     let now = Instant::now();
     let mut cache = CLIENTS.lock().map_err(|_| "HTTP 客户端锁失败")?;
     // 同时到达的请求可能已完成解析；不延长已有结果的有效期。
@@ -446,13 +525,33 @@ pub async fn diagnose() -> Value {
         }),
     };
 
+    // 首页 HTTP 200 并不等于内容接口正常；额外检测匿名列表的真实 API。
+    // 使用用户选中的主线路，诊断不自动代替主线路，最长耗时 12 秒。
+    let api_started = Instant::now();
+    let api_result = tokio::time::timeout(
+        Duration::from_secs(12),
+        edge_once(&cur, "GET", "/api/videos?page=1&size=1", None, None)
+    ).await;
+    let api_check = match api_result {
+        Ok(Ok(_)) => json!({"ok":true, "ms":api_started.elapsed().as_millis() as u64}),
+        Ok(Err(error)) => json!({
+            "ok":false, "ms":api_started.elapsed().as_millis() as u64,
+            "error_kind":crate::playback_log::error_kind(&error),
+        }),
+        Err(_) => json!({"ok":false, "ms":api_started.elapsed().as_millis() as u64, "error_kind":"timeout"}),
+    };
+
     json!({
         "base": cur,
         "host": host,
+        "api": api_check,
+        "auto_line_recovery": "仅匿名 GET 遇到网络或临时网关故障时尝试两条内置固定线路",
         "proxy": {
             "mode": proxy_state()["mode"],
-            "address": PROXY_SETTINGS.read().ok().and_then(|p|
-                if p.mode == "custom" { Some(redact_proxy(&p.url)) } else { None }),
+            "address": PROXY_SETTINGS.read().ok().and_then(|p| {
+                let selected = effective_proxy(&p);
+                selected.map(|s| redact_proxy(&s))
+            }),
             "note": "手动代理模式由代理端解析域名，本地 DNS 失败不代表代理失败",
         },
         "dns": dns,
@@ -554,8 +653,92 @@ fn edge_redirect_target(
     network_policy::redirect_target(current, location)
 }
 
-/// 业务请求：走边缘信封。
+/// 只有这两条源代码内置的固定线路可以互为备用。不读取第三方发布页作自动跳转。
+fn automatic_backup(origin: &str) -> Option<&'static str> {
+    match origin {
+        "https://huangguoai.com" => Some("https://huangguoai.ai"),
+        "https://huangguoai.ai" => Some("https://huangguoai.com"),
+        _ => None,
+    }
+}
+
+/// 仅网络或临时网关故障可触发备用，不把鉴权失败、业务错误或 TLS 证书拒绝当作“被屏蔽”。
+fn temporary_route_error(error: &str) -> bool {
+    if let Some(status) = error.strip_prefix("HTTP ")
+        .and_then(|v| v.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|v| v.parse::<u16>().ok()) {
+        return matches!(status, 408 | 502 | 503 | 504 | 520..=524);
+    }
+    let msg = error.to_ascii_lowercase();
+    if msg.contains("certificate")
+        || msg.contains("tls")
+        || msg.contains("ssl")
+        || msg.contains("authorization")
+        || msg.contains("401")
+        || msg.contains("403")
+        || msg.contains("forbidden")
+        || error.contains("禁止")
+        || error.contains("拒绝")
+    {
+        return false;
+    }
+    ["dns", "connect", "connection", "network", "timeout", "timed out", "tunnel"]
+        .iter().any(|key| msg.contains(key))
+        || error.contains("解析失败")
+        || error.contains("解析超时")
+        || error.contains("网络超时")
+        || error.contains("连接超时")
+}
+
+fn may_recover_with_backup(
+    origin: &str, method: &str, path: &str, has_body: bool, has_token: bool, error: &str,
+) -> bool {
+    // 只读播放地址查询虽然使用 POST，但无副作用（项目原有重试策略已明确）。
+    let safe_read = (method.eq_ignore_ascii_case("GET") && !has_body)
+        || (method.eq_ignore_ascii_case("POST") && edge_operation(path) == "play");
+    automatic_backup(origin).is_some()
+        && safe_read && !has_token
+        && temporary_route_error(error)
+}
+
+/// 默认自动恢复：匿名读取或只读的播放地址查询失败时，尝试另一条内置固定线路。
+/// 不更改用户选择的线路或本地登录会话，不携带账号、Bearer token 或写入请求。
 pub async fn edge(
+    origin: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    token: Option<&str>,
+) -> Result<Value, String> {
+    let first = edge_once(origin, method, path, body.clone(), token).await;
+    match first {
+        Err(first_error) if may_recover_with_backup(origin, method, path, body.is_some(), token.is_some(), &first_error) => {
+            let backup = automatic_backup(origin).expect("经过备用线路白名单验证");
+            crate::playback_log::record("api.trusted_fallback", json!({
+                "operation": edge_operation(path), "from": origin, "to": backup,
+            }));
+            match edge_once(backup, method, path, body, None).await {
+                Ok(value) => {
+                    crate::playback_log::record("api.trusted_fallback_success", json!({
+                        "operation": edge_operation(path), "source": backup,
+                    }));
+                    Ok(value)
+                }
+                Err(_) => {
+                    crate::playback_log::record("api.trusted_fallback_failed", json!({
+                        "operation": edge_operation(path),
+                    }));
+                    // 避免把备用站点的未知错误覆盖到用户实际选择的线路。
+                    Err(first_error)
+                }
+            }
+        }
+        other => other,
+    }
+}
+
+/// 业务请求：单条线路走边缘信封。
+async fn edge_once(
     origin: &str,
     method: &str,
     path: &str,
@@ -878,6 +1061,46 @@ mod tests {
         }
         assert!(edge_redirect_target(&current, 301, "http://example.com/", true).is_err());
         assert!(edge_redirect_target(&current, 301, "https://127.0.0.1/", true).is_err());
+    }
+
+    #[test]
+    fn parses_explicit_macos_system_proxy_without_pac() {
+        let enabled = r#"<dictionary> {
+            HTTPEnable : 1
+            HTTPProxy : 127.0.0.1
+            HTTPPort : 7890
+            HTTPSEnable : 1
+            HTTPSProxy : 127.0.0.1
+            HTTPSPort : 7897
+            ProxyAutoConfigEnable : 0
+        }"#;
+        assert_eq!(parse_macos_proxy(enabled).as_deref(), Some("http://127.0.0.1:7897"));
+        assert_eq!(parse_macos_proxy("ProxyAutoConfigEnable : 1\nProxyAutoConfigURLString : https://config.example/pac"), None);
+        assert_eq!(parse_macos_proxy("HTTPSEnable : 0\nHTTPSProxy : 127.0.0.1\nHTTPSPort : 7897"), None);
+        assert_eq!(parse_macos_proxy("HTTPSEnable : 1\nHTTPSProxy : user:secret@bad.example\nHTTPSPort : 7897"), None);
+    }
+
+    #[test]
+    fn auto_recovery_only_allows_anonymous_read_on_trusted_fixed_sources() {
+        assert_eq!(automatic_backup("https://huangguoai.ai"), Some("https://huangguoai.com"));
+        assert_eq!(automatic_backup("https://huangguoai.com"), Some("https://huangguoai.ai"));
+        assert_eq!(automatic_backup("https://unknown.example"), None);
+        let read_path = "/api/videos?page=1&size=1";
+        let playback = "/api/videos/123/episodes/1/playback";
+        assert!(may_recover_with_backup("https://huangguoai.ai", "GET", read_path, false, false, "DNS 解析失败"));
+        assert!(may_recover_with_backup("https://huangguoai.ai", "get", read_path, false, false, "HTTP 503 Service Unavailable"));
+        assert!(may_recover_with_backup("https://huangguoai.ai", "POST", playback, true, false, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://huangguoai.ai", "POST", playback, true, true, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://huangguoai.ai", "GET", read_path, false, true, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://huangguoai.ai", "POST", "/api/videos/123/comments", true, false, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://huangguoai.ai", "POST", "/api/account/loginByPassword", true, false, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://huangguoai.ai", "GET", read_path, true, false, "DNS 解析失败"));
+        assert!(!may_recover_with_backup("https://unknown.example", "GET", read_path, false, false, "DNS 解析失败"));
+        for err in ["401", "HTTP 403 Forbidden", "HTTP 404 Not Found", "HTTP 429 Too Many Requests",
+                    "certificate verify failed", "TLS handshake error", "禁止访问内网地址",
+                    "业务接口返回失败"] {
+            assert!(!may_recover_with_backup("https://huangguoai.ai", "GET", read_path, false, false, err), "{err}");
+        }
     }
 
     #[test]
