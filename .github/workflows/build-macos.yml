@@ -128,19 +128,17 @@ jobs:
           body: |
             ## HGhub macOS 编译发布版 (v${{ steps.ver.outputs.version }})
 
-            本项目为 [Minireel/HGhub](https://github.com/Minireel/HGhub) 官方源码针对 macOS 平台的编译产物。
+            此版本由 [Dreaminmaster/HGhub](https://github.com/Dreaminmaster/HGhub) 独立构建，不是 Minireel 官方发行版；请勿与已重写的上游插件播放器直接同步。
             原项目已在 PR #1 完成 macOS 适配支持，但官方尚未在 Release 页面发布 Mac 版产物。
 
             ### 下载说明
-            - **Apple Silicon (M1/M2/M3/M4 系列芯片)**: 推荐下载 `HGhub_${{ steps.ver.outputs.version }}_arm64.dmg`
+            - **Apple Silicon (M1/M2/M3/M4/M5 系列芯片)**: 推荐下载 `HGhub_${{ steps.ver.outputs.version }}_arm64.dmg`
             - **Intel 芯片**: 推荐下载 `HGhub_${{ steps.ver.outputs.version }}_x64.dmg`
             - **通用双架构版 (全机型支持)**: 推荐下载 `HGhub_${{ steps.ver.outputs.version }}_universal.dmg`
 
             ### macOS 首次打开说明（绕过未签名提示）
-            由于开源个人构建未购买苹果开发者企业证书签名与公证，首次打开若提示“已损坏”或“无法打开”，请在「终端」中执行以下命令清除隔离属性：
-            ```bash
-            sudo xattr -rd com.apple.quarantine /Applications/HGhub.app
-            ```
+            此安装包采用临时签名（ad-hoc），未经过 Apple 公证。如果 macOS 阻止打开，先确认安装包来自本仓库，然后尝试打开一次，再到「系统设置 → 隐私与安全性」选择「仍要打开」（Open Anyway）。
+            如果提示文件确实损坏、程序闪退，或程序启动后无法加载内容，不要直接关闭系统安全保护；请先按照仓库 README 的排障步骤检查。
           files: artifacts/*
           fail_on_unmatched_files: true
           draft: false
