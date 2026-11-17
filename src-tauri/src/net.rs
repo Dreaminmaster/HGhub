@@ -196,6 +196,7 @@ fn proxy_override() -> Option<String> {
 }
 
 /// 解析 macOS scutil 的显式 HTTPS/HTTP 系统代理。PAC/WPAD 不解析、不执行。
+#[cfg(any(target_os = "macos", test))]
 fn parse_macos_proxy(text: &str) -> Option<String> {
     let mut values: HashMap<&str, &str> = HashMap::new();
     for line in text.lines() {
@@ -210,8 +211,12 @@ fn parse_macos_proxy(text: &str) -> Option<String> {
         if values.get(enabled).copied() != Some("1") {
             continue;
         }
-        let host = values.get(host_key)?.trim();
-        let port = values.get(port_key)?.parse::<u16>().ok()?;
+        let Some(host) = values.get(host_key).map(|v| v.trim()) else {
+            continue;
+        };
+        let Some(port) = values.get(port_key).and_then(|v| v.parse::<u16>().ok()) else {
+            continue;
+        };
         if port == 0 || host.is_empty() {
             continue;
         }
@@ -228,17 +233,34 @@ fn parse_macos_proxy(text: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
+static MACOS_PROXY_CACHE: Lazy<Mutex<Option<(Instant, Option<String>)>>> =
+    Lazy::new(|| Mutex::new(None));
+
+#[cfg(target_os = "macos")]
 fn macos_system_proxy() -> Option<String> {
     use std::process::Command;
-    let output = Command::new("/usr/sbin/scutil")
-        .arg("--proxy")
-        .output()
-        .ok()?;
-    if !output.status.success() || output.stdout.len() > 32768 {
-        return None;
+    // 不为每个 HLS 分片都启动 scutil；系统代理变化最多约 10 秒内生效。
+    if let Ok(mut cache) = MACOS_PROXY_CACHE.lock() {
+        if let Some((last_checked, result)) = cache.as_ref() {
+            if last_checked.elapsed() < Duration::from_secs(10) {
+                return result.clone();
+            }
+        }
+        let result = Command::new("/usr/sbin/scutil")
+            .arg("--proxy")
+            .output()
+            .ok()
+            .and_then(|output| {
+                if !output.status.success() || output.stdout.len() > 32768 {
+                    return None;
+                }
+                String::from_utf8(output.stdout).ok()
+            })
+            .and_then(|text| parse_macos_proxy(&text));
+        *cache = Some((Instant::now(), result.clone()));
+        return result;
     }
-    let text = String::from_utf8(output.stdout).ok()?;
-    parse_macos_proxy(&text)
+    None
 }
 
 #[cfg(not(target_os = "macos"))]
