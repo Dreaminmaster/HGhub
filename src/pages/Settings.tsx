@@ -146,7 +146,7 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
                 某些 Wi-Fi 无法连接来源时，可指定已经启动的可信 HTTP 代理；本功能不提供代理服务器，也不会自动切换未知站点。
               </div>
               <div className="mt-2 rounded-(--r-sm) bg-s3/60 px-3 py-2 text-[10.5px] text-on/80 leading-relaxed">
-                自动恢复已启用：匿名内容请求遇到网络或临时网关故障时，先尝试另一条可信固定线路，无需填写代理。
+                自动恢复已启用：匿名读取及无凭据播放地址查询发生网络或临时网关故障时，尝试另一条可信固定线路。macOS「跟随系统」会自动识别已启用的 HTTP(S) 代理，无需填写端口。
                 如果两条线路都受限，仍需要系统网络服务或手动代理。
               </div>
               <div className="grid grid-cols-3 gap-1.5 mt-3">
