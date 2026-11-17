@@ -106,6 +106,9 @@ export const api = {
   collect: (id: number, on: boolean) => call<unknown>("api_collect", { id, on }),
   follow: (uid: number, on: boolean) => call<unknown>("api_follow", { uid, on }),
 
+  proxyState: () => call<ProxyState>("proxy_state"),
+  proxySet: (mode: ProxyState["mode"], url = "") => call<ProxyState>("proxy_set", { mode, url }),
+
   /* 线路（数据源）：固定线路写死在 Rust 侧，镜像线路按需从地址发布页拉取 */
   lineState: () => call<LineState>("line_state"),
   lineSet: (url: string) => call<string>("line_set", { url }),
@@ -133,6 +136,7 @@ export type UpdateInfo = {
 /* ── 线路（数据源） ─────────────────────────────────────── */
 
 export type LineItem = { name?: string; url: string; host?: string };
+export type ProxyState = { mode: "system" | "direct" | "custom"; url: string };
 export type LineState = { base: string; default: string; fixed: LineItem[] };
 export type LineMirrors = { source: string; script?: string; items: LineItem[] };
 export type LineProbe = { url: string; ok: boolean; status?: number; ms: number; error?: string };

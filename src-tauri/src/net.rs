@@ -83,6 +83,16 @@ pub fn bind_base(dir: &std::path::Path) {
     if let Ok(mut f) = BASE_FILE.write() {
         *f = Some(path);
     }
+    if let Ok(text) = std::fs::read_to_string(dir.join("proxy.json")) {
+        if let Ok(v) = serde_json::from_str::<Value>(&text) {
+            if let Some(mode) = v.get("mode").and_then(Value::as_str) {
+                let url = v.get("url").and_then(Value::as_str).unwrap_or("");
+                if let Ok(valid) = validate_proxy(mode, url) {
+                    if let Ok(mut current) = PROXY_SETTINGS.write() { *current = valid; }
+                }
+            }
+        }
+    }
 }
 
 /// 切换线路并落盘，返回规整后的地址。
@@ -111,6 +121,71 @@ pub fn set_base(url: &str) -> Result<String, String> {
 pub const UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+/// 用户选择的网络方式。默认系统代理；不会自动使用未知镜像。
+#[derive(Clone)]
+struct ProxySettings {
+    mode: String,
+    url: String,
+}
+impl Default for ProxySettings {
+    fn default() -> Self {
+        Self { mode: "system".to_string(), url: String::new() }
+    }
+}
+static PROXY_SETTINGS: Lazy<RwLock<ProxySettings>> =
+    Lazy::new(|| RwLock::new(ProxySettings::default()));
+
+fn validate_proxy(mode: &str, raw: &str) -> Result<ProxySettings, String> {
+    match mode {
+        "system" | "direct" => Ok(ProxySettings { mode: mode.into(), url: String::new() }),
+        "custom" => {
+            if raw.len() > 512 || raw.chars().any(char::is_control) {
+                return Err("代理地址过长或包含控制字符".into());
+            }
+            let u = url::Url::parse(raw.trim()).map_err(|_| "代理地址格式不正确")?;
+            if !matches!(u.scheme(), "http" | "https")
+                || !u.username().is_empty() || u.password().is_some()
+                || u.path() != "/" || u.query().is_some() || u.fragment().is_some()
+                || u.host_str().is_none()
+            {
+                return Err("仅支持不带账号密码、路径或参数的 HTTP(S) 代理地址".into());
+            }
+            let host = u.host_str().unwrap_or("").to_ascii_lowercase();
+            if matches!(host.as_str(), "tauri.localhost" | "hg.localhost" | "ipc.localhost") {
+                return Err("不能使用应用内部主机名作为代理".into());
+            }
+            Ok(ProxySettings {
+                mode: "custom".into(),
+                url: u.as_str().trim_end_matches('/').into(),
+            })
+        }
+        _ => Err("未知代理模式".into()),
+    }
+}
+
+pub fn proxy_state() -> Value {
+    let config = PROXY_SETTINGS.read().map(|x| x.clone()).unwrap_or_default();
+    json!({"mode": config.mode, "url": config.url})
+}
+
+/// 先安全落盘再切换。代理仅改变传输方式，不修改登录、收藏和历史。
+pub fn proxy_set(mode: &str, url: &str) -> Result<Value, String> {
+    let config = validate_proxy(mode, url)?;
+    let base_file = BASE_FILE.read().map_err(|_| "网络设置锁失败")?
+        .clone().ok_or("应用数据目录尚未初始化")?;
+    let path = base_file.with_file_name("proxy.json");
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, json!({"mode":config.mode,"url":config.url}).to_string())
+        .and_then(|_| std::fs::rename(&temp, path))
+        .map_err(|_| "代理设置保存失败")?;
+    {
+        let mut current = PROXY_SETTINGS.write().map_err(|_| "网络设置锁失败")?;
+        *current = config;
+    }
+    refresh_client();
+    Ok(proxy_state())
+}
+
 /// 手动指定代理（排查 / 公司内网用）：`HGHUB_PROXY=http://127.0.0.1:7897`。
 /// 不设时交给 reqwest 的 `system-proxy` 探测（注册表 + 环境变量）。
 fn proxy_override() -> Option<String> {
@@ -125,7 +200,7 @@ fn proxy_override() -> Option<String> {
 /// 注意：reqwest 的 `system-proxy` 只在构建时读一次注册表 / 环境变量。代理软件被关掉后，
 /// 旧客户端仍会往 `127.0.0.1:7897` 建隧道，症状是满屏 `tunnel error: failed to create
 /// underlying connection`（浏览器却是通的，因为它每次都重读系统代理）。所以这里允许重建。
-fn build_client(host: &str, addrs: &[SocketAddr]) -> Result<reqwest::Client, String> {
+fn build_client(host: &str, addrs: &[SocketAddr], config: &ProxySettings) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .user_agent(UA)
         .timeout(Duration::from_secs(20))
@@ -138,10 +213,14 @@ fn build_client(host: &str, addrs: &[SocketAddr]) -> Result<reqwest::Client, Str
     if !addrs.is_empty() {
         builder = builder.resolve_to_addrs(host, addrs);
     }
-    if let Some(p) = proxy_override() {
-        // 错误信息不能含原始代理 URL（其中可能有用户名/密码）。
-        let proxy = reqwest::Proxy::all(&p).map_err(|_| "HGHUB_PROXY 配置无效（已隐藏原始值）")?;
-        builder = builder.proxy(proxy);
+    if config.mode == "direct" {
+        builder = builder.no_proxy();
+    } else {
+        let p = if config.mode == "custom" { Some(config.url.clone()) } else { proxy_override() };
+        if let Some(url) = p {
+            let proxy = reqwest::Proxy::all(&url).map_err(|_| "代理地址无效（详细信息已隐藏）")?;
+            builder = builder.proxy(proxy);
+        }
     }
     builder
         .build()
@@ -166,19 +245,24 @@ async fn client_for(raw: &str) -> Result<(url::Url, Arc<reqwest::Client>), Strin
     let target = network_policy::parse_target_with_mode(raw, strict)?;
     let host = target.host_str().ok_or("目标缺少主机名")?;
     let port = target.port_or_known_default().ok_or("目标端口无效")?;
-    let key = format!("{strict}:{host}:{port}");
+    let config = PROXY_SETTINGS.read().map_err(|_| "网络设置锁失败")?.clone();
+    let key = format!("{strict}:{}:{}:{host}:{port}", config.mode, config.url);
     {
         let cache = CLIENTS.lock().map_err(|_| "HTTP 客户端锁失败")?;
         if let Some(http) = cached_client(&cache, &key, Instant::now()) {
             return Ok((target, http));
         }
     }
-    let addrs = if strict {
+    // 用户显式代理时，由 HTTP CONNECT 代理解析域名，避免本地 DNS 被阻断。
+    // 仍由 parse_target_with_mode 阻止字面私网 IP 和内部域名；代理必须可信。
+    let explicit_proxy = config.mode == "custom"
+        || (config.mode == "system" && proxy_override().is_some());
+    let addrs = if strict && !explicit_proxy {
         network_policy::resolve_target(&target, strict).await?
     } else {
         Vec::new()
     };
-    let http = Arc::new(build_client(host, &addrs)?);
+    let http = Arc::new(build_client(host, &addrs, &config)?);
     let now = Instant::now();
     let mut cache = CLIENTS.lock().map_err(|_| "HTTP 客户端锁失败")?;
     // 同时到达的请求可能已完成解析；不延长已有结果的有效期。
@@ -365,6 +449,12 @@ pub async fn diagnose() -> Value {
     json!({
         "base": cur,
         "host": host,
+        "proxy": {
+            "mode": proxy_state()["mode"],
+            "address": PROXY_SETTINGS.read().ok().and_then(|p|
+                if p.mode == "custom" { Some(redact_proxy(&p.url)) } else { None }),
+            "note": "手动代理模式由代理端解析域名，本地 DNS 失败不代表代理失败",
+        },
         "dns": dns,
         "http": http,
         "env": {
@@ -788,6 +878,22 @@ mod tests {
         }
         assert!(edge_redirect_target(&current, 301, "http://example.com/", true).is_err());
         assert!(edge_redirect_target(&current, 301, "https://127.0.0.1/", true).is_err());
+    }
+
+    #[test]
+    fn validates_user_proxy_without_secrets() {
+        assert!(validate_proxy("custom", "http://127.0.0.1:7890").is_ok());
+        assert!(validate_proxy("custom", "https://proxy.example.com:443").is_ok());
+        assert_eq!(validate_proxy("direct", "ignored").unwrap().url, "");
+        for raw in [
+            "socks5h://127.0.0.1:1080",
+            "http://user:password@127.0.0.1:7890",
+            "http://hg.localhost:7890",
+            "http://127.0.0.1:7890/path",
+            "http://127.0.0.1:7890/?token=secret",
+        ] {
+            assert!(validate_proxy("custom", raw).is_err(), "{raw}");
+        }
     }
 
     #[test]

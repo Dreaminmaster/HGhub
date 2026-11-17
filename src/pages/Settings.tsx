@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { api, APP_VERSION, hostOf, logLine, platform, type UpdateInfo } from "../api";
+import { api, APP_VERSION, hostOf, logLine, platform, type UpdateInfo, type ProxyState } from "../api";
 import { useStore } from "../store";
 import { Modal, Toggle } from "../components/ui";
 import LinePicker from "../components/LinePicker";
@@ -15,6 +15,11 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
   const [clearing, setClearing] = useState(false);
   const [lineOpen, setLineOpen] = useState(false);
   const [lineBase, setLineBase] = useState("");
+  const [proxyMode, setProxyMode] = useState<ProxyState["mode"]>("system");
+  const [proxyUrl, setProxyUrl] = useState("");
+  const [proxyReady, setProxyReady] = useState(false);
+  const [proxyBusy, setProxyBusy] = useState(false);
+  const [proxyResult, setProxyResult] = useState("");
   const [checking, setChecking] = useState(false);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const playbackLog = usePlaybackLog();
@@ -24,6 +29,34 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
     api.lineState().then((s) => setLineBase(s.base)).catch(() => {});
   };
   useEffect(readLine, []);
+  useEffect(() => {
+    let mounted = true;
+    api.proxyState().then(s => {
+      if (!mounted) return;
+      setProxyMode(s.mode);
+      setProxyUrl(s.url);
+      setProxyReady(true);
+    }).catch(() => {
+      if (mounted) setProxyResult("读取代理设置失败，请重新启动应用");
+    });
+    return () => { mounted = false; };
+  }, []);
+
+  const saveProxy = async () => {
+    setProxyBusy(true);
+    setProxyResult("");
+    try {
+      const result = await api.proxySet(proxyMode, proxyMode === "custom" ? proxyUrl.trim() : "");
+      setProxyMode(result.mode);
+      setProxyUrl(result.url);
+      setProxyResult("设置已保存，后续请求将通过新网络方式发送。");
+      toast("网络访问方式已更新", "ok");
+    } catch (e) {
+      setProxyResult((e as Error).message || "保存代理设置失败");
+    } finally {
+      setProxyBusy(false);
+    }
+  };
   useEffect(() => { void initPlaybackLog(); }, []);
 
   const checkUpdate = async () => {
@@ -107,6 +140,65 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
           </Section>
 
           <Section title="网络">
+            <div className="px-3.5 pt-3 pb-3 border-b border-s3">
+              <div className="text-[12.5px] font-medium text-on">网络访问方式</div>
+              <div className="text-[10.5px] text-mut mt-1 leading-relaxed">
+                某些 Wi-Fi 无法连接来源时，可指定已经启动的可信 HTTP 代理；本功能不提供代理服务器，也不会自动切换未知站点。
+              </div>
+              <div className="grid grid-cols-3 gap-1.5 mt-3">
+                {([
+                  ["system", "跟随系统"],
+                  ["direct", "直接连接"],
+                  ["custom", "手动代理"],
+                ] as const).map(([mode, label]) => (
+                  <button key={mode} type="button" disabled={!proxyReady || proxyBusy}
+                    onClick={() => { setProxyMode(mode); setProxyResult(""); }}
+                    className={"h-9 rounded-(--r-ctl) text-[11.5px] pressable disabled:opacity-50 " +
+                      (proxyMode === mode ? "bg-primary text-on-primary font-semibold" : "bg-s3 text-on/85")}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {proxyMode === "custom" && (
+                <div className="mt-3">
+                  <label htmlFor="hghub-proxy" className="block text-[11px] text-on mb-1">
+                    HTTP(S) 代理地址
+                  </label>
+                  <input id="hghub-proxy" type="url" inputMode="url"
+                    autoComplete="off" autoCapitalize="none" spellCheck={false}
+                    placeholder="http://127.0.0.1:7890"
+                    value={proxyUrl}
+                    onChange={e => { setProxyUrl(e.target.value); setProxyResult(""); }}
+                    className="w-full h-10 px-3 rounded-(--r-ctl) bg-s3 text-on text-[12px] outline-none focus:ring-1 focus:ring-primary"
+                  />
+                  <p className="text-[10px] text-mut leading-relaxed mt-1">
+                    请填写代理软件的 HTTP 或 Mixed 端口。当前不接受 SOCKS 或带账号密码的地址。
+                    代理可能知道访问的域名，请仅使用可信代理。
+                  </p>
+                </div>
+              )}
+              <div className="flex items-center gap-2 mt-3">
+                <button type="button" disabled={!proxyReady || proxyBusy}
+                  onClick={() => { void saveProxy(); }}
+                  className="h-9 px-4 rounded-(--r-ctl) bg-primary text-on-primary text-[11.5px] font-semibold pressable disabled:opacity-50">
+                  {proxyBusy ? "保存中…" : "保存网络设置"}
+                </button>
+                <button type="button" disabled={!proxyReady || proxyBusy}
+                  onClick={() => {
+                    setProxyBusy(true);
+                    void api.netDiag().then(res => {
+                      const http = res.http as { status?: number; error?: string } | undefined;
+                      setProxyResult(http?.status ? "当前线路响应：HTTP " + http.status :
+                        http?.error ? "连接失败：" + http.error : "检测完成");
+                    }).catch(e => setProxyResult((e as Error).message || "检测失败"))
+                      .finally(() => setProxyBusy(false));
+                  }}
+                  className="h-9 px-3 rounded-(--r-ctl) bg-s3 text-on text-[11.5px] pressable disabled:opacity-50">
+                  检测连接
+                </button>
+              </div>
+              {proxyResult && <div role="status" className="mt-2 text-[11px] text-mut break-words">{proxyResult}</div>}
+            </div>
             <button onClick={() => setLineOpen(true)} className="w-full flex items-center gap-3 px-3.5 py-3 text-left pressable">
               <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IBoltF size={16} /></span>
               <div className="flex-1 min-w-0">
