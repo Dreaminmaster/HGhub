@@ -363,7 +363,15 @@ fn parse_doh_answers(answer: &Value, qtype: u64, port: u16) -> Result<Vec<Socket
                     continue;
                 }
                 // 对所有答案执行私网地址检查；不能只挑选其中的公开 IP。
-                if !network_policy::allowed_ip(ip) {
+                // 外部公开 DNS 不应返回 FakeIP (198.18.0.0/15)。
+                // 该例外只适用于本地可信 TUN，不能复用于远程 DNS 结果。
+                let fake_ip = match ip {
+                    std::net::IpAddr::V4(v4) => v4.octets()[0] == 198
+                        && matches!(v4.octets()[1], 18 | 19),
+                    std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().is_some_and(|v4|
+                        v4.octets()[0] == 198 && matches!(v4.octets()[1], 18 | 19)),
+                };
+                if !network_policy::allowed_ip(ip) || fake_ip {
                     return Err("加密 DNS 返回了不允许的目标地址".into());
                 }
                 addrs.push(SocketAddr::new(ip, port));
@@ -684,6 +692,11 @@ pub async fn diagnose() -> Value {
         "host": host,
         "api": api_check,
         "auto_line_recovery": "仅匿名 GET 遇到网络或临时网关故障时尝试两条内置固定线路",
+        "secure_dns": {
+            "mode": "automatic_fallback_on_local_dns_error",
+            "providers": ["Cloudflare DNS", "Google Public DNS"],
+            "note": "仅向加密 DNS 提交域名；DNS 恢复不代表网站或视频服务可访问",
+        },
         "proxy": {
             "mode": proxy_state()["mode"],
             "address": PROXY_SETTINGS.read().ok().and_then(|p| {
@@ -1227,6 +1240,10 @@ mod tests {
             {"type":1,"data":"1.2.3.4"}, {"type":1,"data":"127.0.0.1"}
         ]});
         assert!(parse_doh_answers(&bad, 1, 443).is_err());
+        let fake = json!({"Status":0,"Answer":[{"type":1,"data":"198.18.0.2"}]});
+        assert!(parse_doh_answers(&fake, 1, 443).is_err());
+        let invalid6 = json!({"Status":0,"Answer":[{"type":28,"data":"::1"}]});
+        assert!(parse_doh_answers(&invalid6, 28, 443).is_err());
         assert!(parse_doh_answers(&json!({"Status":3}), 1, 443).is_err());
         assert!(local_dns_failure("DNS 解析超时"));
         assert!(!local_dns_failure("禁止访问普通内网、回环或保留地址"));
