@@ -21,6 +21,10 @@
   },
   "bundle": {
     "targets": ["app", "dmg"],
+    "resources": [
+      "resources/usque",
+      "resources/LICENSE-usque.txt"
+    ],
     "macOS": {
       "signingIdentity": "-"
     }
