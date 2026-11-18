@@ -138,6 +138,7 @@ static PROXY_SETTINGS: Lazy<RwLock<ProxySettings>> =
 fn validate_proxy(mode: &str, raw: &str) -> Result<ProxySettings, String> {
     match mode {
         "system" | "direct" => Ok(ProxySettings { mode: mode.into(), url: String::new() }),
+        "warp" if cfg!(target_os = "macos") => Ok(ProxySettings { mode: mode.into(), url: String::new() }),
         "custom" => {
             if raw.len() > 512 || raw.chars().any(char::is_control) {
                 return Err("代理地址过长或包含控制字符".into());
@@ -171,6 +172,10 @@ pub fn proxy_state() -> Value {
 /// 先安全落盘再切换。代理仅改变传输方式，不修改登录、收藏和历史。
 pub fn proxy_set(mode: &str, url: &str) -> Result<Value, String> {
     let config = validate_proxy(mode, url)?;
+    // Do not let front-end callers enable a missing or stopped sidecar.
+    if mode == "warp" && crate::warp::proxy_url().is_none() {
+        return Err("内置 WARP 尚未连接；请先点击连接并完成检测".into());
+    }
     let base_file = BASE_FILE.read().map_err(|_| "网络设置锁失败")?
         .clone().ok_or("应用数据目录尚未初始化")?;
     let path = base_file.with_file_name("proxy.json");
@@ -273,6 +278,7 @@ fn effective_proxy(config: &ProxySettings) -> Option<String> {
     match config.mode.as_str() {
         "direct" => None,
         "custom" => Some(config.url.clone()),
+        "warp" => crate::warp::proxy_url(),
         _ => proxy_override().or_else(macos_system_proxy),
     }
 }
@@ -458,6 +464,11 @@ async fn client_for(raw: &str) -> Result<(url::Url, Arc<reqwest::Client>), Strin
     let port = target.port_or_known_default().ok_or("目标端口无效")?;
     let config = PROXY_SETTINGS.read().map_err(|_| "网络设置锁失败")?.clone();
     let proxy_url = effective_proxy(&config);
+    // Fail closed if the user explicitly selected the embedded tunnel.
+    // Never leak HGhub traffic directly if usque exits or cannot reconnect.
+    if config.mode == "warp" && proxy_url.is_none() {
+        return Err("内置 WARP 连接未建立；请在设置中重新连接或关闭内置 WARP".into());
+    }
     let key = format!("{strict}:{}:{}:{host}:{port}", config.mode, proxy_url.as_deref().unwrap_or("direct"));
     {
         let cache = CLIENTS.lock().map_err(|_| "HTTP 客户端锁失败")?;
