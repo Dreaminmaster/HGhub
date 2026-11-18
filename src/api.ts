@@ -108,6 +108,9 @@ export const api = {
 
   proxyState: () => call<ProxyState>("proxy_state"),
   proxySet: (mode: ProxyState["mode"], url = "") => call<ProxyState>("proxy_set", { mode, url }),
+  warpStatus: () => call<WarpStatus>("warp_status"),
+  warpEnable: (acceptTerms = false) => call<WarpStatus>("warp_enable", { acceptTerms }),
+  warpDisable: () => call<WarpStatus>("warp_disable"),
 
   /* 线路（数据源）：固定线路写死在 Rust 侧，镜像线路按需从地址发布页拉取 */
   lineState: () => call<LineState>("line_state"),
@@ -136,7 +139,8 @@ export type UpdateInfo = {
 /* ── 线路（数据源） ─────────────────────────────────────── */
 
 export type LineItem = { name?: string; url: string; host?: string };
-export type ProxyState = { mode: "system" | "direct" | "custom"; url: string };
+export type ProxyState = { mode: "system" | "direct" | "custom" | "warp"; url: string };
+export type WarpStatus = { available: boolean; registered: boolean; running: boolean; active: boolean; mode?: string };
 export type LineState = { base: string; default: string; fixed: LineItem[] };
 export type LineMirrors = { source: string; script?: string; items: LineItem[] };
 export type LineProbe = { url: string; ok: boolean; status?: number; ms: number; error?: string };
