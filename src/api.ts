@@ -140,7 +140,7 @@ export type UpdateInfo = {
 
 export type LineItem = { name?: string; url: string; host?: string };
 export type ProxyState = { mode: "system" | "direct" | "custom" | "warp"; url: string };
-export type WarpStatus = { available: boolean; registered: boolean; running: boolean; active: boolean; mode?: string };
+export type WarpStatus = { available: boolean; registered: boolean; running: boolean; active: boolean; transport?: string | null; mode?: string };
 export type LineState = { base: string; default: string; fixed: LineItem[] };
 export type LineMirrors = { source: string; script?: string; items: LineItem[] };
 export type LineProbe = { url: string; ok: boolean; status?: number; ms: number; error?: string };
