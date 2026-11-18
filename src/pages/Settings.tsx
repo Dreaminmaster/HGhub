@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { api, APP_VERSION, hostOf, logLine, platform, type UpdateInfo, type ProxyState } from "../api";
+import { api, APP_VERSION, hostOf, logLine, platform, type UpdateInfo, type ProxyState, type WarpStatus } from "../api";
 import { useStore } from "../store";
 import { Modal, Toggle } from "../components/ui";
 import LinePicker from "../components/LinePicker";
@@ -20,6 +20,11 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
   const [proxyReady, setProxyReady] = useState(false);
   const [proxyBusy, setProxyBusy] = useState(false);
   const [proxyResult, setProxyResult] = useState("");
+  const [warp, setWarp] = useState<WarpStatus | null>(null);
+  const [warpBusy, setWarpBusy] = useState(false);
+  const [warpMessage, setWarpMessage] = useState("");
+  const [warpTermsOpen, setWarpTermsOpen] = useState(false);
+  const [warpAgreed, setWarpAgreed] = useState(false);
   const [checking, setChecking] = useState(false);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const playbackLog = usePlaybackLog();
@@ -42,10 +47,63 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
     return () => { mounted = false; };
   }, []);
 
+  useEffect(() => {
+    if (platform !== "macos") return;
+    let active = true;
+    const refresh = () => {
+      void api.warpStatus().then(status => {
+        if (active) setWarp(status);
+      }).catch(() => {
+        if (active) setWarp(null);
+      });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 6000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
+
+  const enableWarp = async (acceptTerms: boolean) => {
+    setWarpBusy(true);
+    setWarpMessage("正在连接，首次使用需要注册设备并检测安全出口...");
+    try {
+      const result = await api.warpEnable(acceptTerms);
+      setWarp(result);
+      setProxyMode("warp");
+      setProxyUrl("");
+      setWarpMessage("内置 WARP 已连接并验证出口，仅 HGhub 请求使用该连接。");
+      toast("内置 WARP 已连接", "ok");
+    } catch (e) {
+      setWarpMessage((e as Error).message || "内置 WARP 启动失败");
+      void api.warpStatus().then(setWarp).catch(() => {});
+    } finally {
+      setWarpBusy(false);
+    }
+  };
+
+  const disableWarp = async () => {
+    setWarpBusy(true);
+    setWarpMessage("");
+    try {
+      const result = await api.warpDisable();
+      setWarp(result);
+      setProxyMode("system");
+      setProxyUrl("");
+      setWarpMessage("WARP 已断开，HGhub 恢复跟随系统。");
+      toast("已关闭内置 WARP", "ok");
+    } catch (e) {
+      setWarpMessage((e as Error).message || "WARP 断开失败");
+    } finally {
+      setWarpBusy(false);
+    }
+  };
+
   const saveProxy = async () => {
     setProxyBusy(true);
     setProxyResult("");
     try {
+      if (warp?.running && proxyMode !== "warp") {
+        setWarp(await api.warpDisable());
+      }
       const result = await api.proxySet(proxyMode, proxyMode === "custom" ? proxyUrl.trim() : "");
       setProxyMode(result.mode);
       setProxyUrl(result.url);
@@ -140,6 +198,68 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
           </Section>
 
           <Section title="网络">
+            {platform === "macos" && (
+              <div className="px-3.5 pt-3 pb-3 border-b border-s3">
+                <div className="flex items-center gap-2">
+                  <span className="w-8 h-8 flex items-center justify-center rounded-full bg-s3 text-primary">
+                    <IBoltF size={18} />
+                  </span>
+                  <div className="flex-1">
+                    <div className="text-[12.5px] font-semibold text-on">内置 WARP · 免费网络增强</div>
+                    <div className="text-[10.5px] text-mut">
+                      {warp?.active ? "已连接 · 已验证 Cloudflare WARP 出口" :
+                        warp?.registered ? "已有设备凭据 · 未连接" :
+                        "首次启用需要确认服务条款"}
+                    </div>
+                  </div>
+                  <span className={"text-[10px] px-2 py-1 rounded-full " +
+                    (warp?.active ? "bg-primary/20 text-primary" : "bg-s3 text-mut")}>
+                    {warp?.active ? "已开启" : "未开启"}
+                  </span>
+                </div>
+                <p className="text-[10.5px] text-mut leading-relaxed mt-2">
+                  内置开源 usque；不需要另装软件、购买服务器或填写代理端口。只转发 HGhub 内的 HTTP(S) 请求，
+                  不修改 Mac 的全局网络设置。启用后首次注册设备，并在每次连接时检查真实 WARP 出口。
+                </p>
+                <div className="flex gap-2 mt-3">
+                  {warp?.active || warp?.running ? (
+                    <button type="button" disabled={warpBusy}
+                      onClick={() => { void disableWarp(); }}
+                      className="h-9 px-4 rounded-(--r-ctl) bg-s3 text-on text-[11.5px] font-semibold pressable disabled:opacity-50">
+                      {warpBusy ? "正在处理…" : "断开内置 WARP"}
+                    </button>
+                  ) : (
+                    <button type="button" disabled={warpBusy || !warp?.available}
+                      onClick={() => {
+                        if (!warp?.registered) {
+                          setWarpAgreed(false);
+                          setWarpTermsOpen(true);
+                        } else {
+                          void enableWarp(false);
+                        }
+                      }}
+                      className="h-9 px-4 rounded-(--r-ctl) bg-primary text-on-primary text-[11.5px] font-semibold pressable disabled:opacity-50">
+                      {warpBusy ? "正在连接…" : "一键启用 WARP"}
+                    </button>
+                  )}
+                  <button type="button" disabled={warpBusy}
+                    onClick={() => { void api.warpStatus().then(setWarp).catch(() => setWarp(null)); }}
+                    className="h-9 px-3 rounded-(--r-ctl) bg-s3 text-on text-[11.5px] pressable disabled:opacity-50">
+                    刷新状态
+                  </button>
+                </div>
+                {warp?.available === false && (
+                  <p role="status" className="text-[10.5px] text-danger mt-2">
+                    安装包缺少内置组件，请使用官方仓库发布的 macOS 完整安装包。
+                  </p>
+                )}
+                {warpMessage && <p role="status" className="text-[10.5px] text-mut mt-2 break-words">{warpMessage}</p>}
+                <p className="text-[10px] text-dim mt-2 leading-relaxed">
+                  WARP 是第三方网络服务，不保证每个来源可用，也不会绕过账号或付费权限。
+                  由你主动启用；退出 HGhub 时停止本地组件。
+                </p>
+              </div>
+            )}
             <div className="px-3.5 pt-3 pb-3 border-b border-s3">
               <div className="text-[12.5px] font-medium text-on">网络访问方式</div>
               <div className="text-[10.5px] text-mut mt-1 leading-relaxed">
@@ -313,6 +433,38 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
           <div className="text-center text-[10px] text-dim mt-5">HGhub {APP_VERSION} · {platform === "android" ? "Android" : platform === "ios" ? "iOS" : platform === "macos" ? "macOS" : platform === "linux" ? "Linux" : "Windows"} 客户端</div>
         </div>
       </div>
+
+      <Modal open={warpTermsOpen} onClose={() => setWarpTermsOpen(false)} width={410}>
+        <div className="p-5">
+          <div className="text-[15px] font-bold text-on">首次启用内置 WARP</div>
+          <p className="mt-2 text-[12px] text-mut leading-relaxed">
+            HGhub 使用 MIT 许可的开源 usque 客户端，向 Cloudflare 注册仅供此设备使用的 WARP 凭据。
+            启用后，HGhub 访问的网站域名和网络流量会经过 Cloudflare；HTTPS 内容仍使用原有证书验证。
+            凭据和设备私钥仅保存在本机应用数据目录，不上传到 HGhub 服务器。
+          </p>
+          <p className="mt-2 text-[11px] text-mut leading-relaxed">
+            这是非官方的 WARP 客户端，服务可能限制、不可用或变更。应用不会修改系统代理、安装网络扩展或代你购买服务。
+          </p>
+          <button type="button" onClick={() => { void api.openUrl("https://www.cloudflare.com/policies/terms/"); }}
+            className="mt-3 text-[11.5px] text-primary underline text-left pressable">
+            阅读 Cloudflare 服务条款
+          </button>
+          <label className="mt-3 flex items-start gap-2 text-[11.5px] text-on leading-relaxed cursor-pointer">
+            <input type="checkbox" checked={warpAgreed}
+              onChange={e => setWarpAgreed(e.target.checked)} className="mt-0.5"/>
+            <span>我已了解并同意使用 Cloudflare WARP 服务，将 HGhub 网络请求通过其服务器传输，并接受相关条款。</span>
+          </label>
+          <div className="flex gap-2 mt-5">
+            <button type="button" onClick={() => setWarpTermsOpen(false)}
+              className="flex-1 h-10 bg-s3 rounded-(--r-ctl) text-on/80 text-[12px] pressable">取消</button>
+            <button type="button" disabled={!warpAgreed || warpBusy}
+              onClick={() => { setWarpTermsOpen(false); void enableWarp(true); }}
+              className="flex-1 h-10 bg-primary rounded-(--r-ctl) text-on-primary text-[12px] font-semibold pressable disabled:opacity-50">
+              同意并启用
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       <LinePicker open={lineOpen} onClose={() => { setLineOpen(false); readLine(); }} />
 
