@@ -207,7 +207,7 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
                   <div className="flex-1">
                     <div className="text-[12.5px] font-semibold text-on">内置 WARP · 免费网络增强</div>
                     <div className="text-[10.5px] text-mut">
-                      {warp?.active ? "已连接 · 已验证 Cloudflare WARP 出口" :
+                      {warp?.active ? "内置代理运行中 · " + (warp.transport || "出口已在连接时验证") :
                         warp?.registered ? "已有设备凭据 · 未连接" :
                         "首次启用需要确认服务条款"}
                     </div>
