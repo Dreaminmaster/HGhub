@@ -22,6 +22,7 @@ mod native {
     struct Running {
         child: Option<Child>,
         port: Option<u16>,
+        transport: Option<&'static str>,
     }
 
     static RUNNING: Lazy<Mutex<Running>> = Lazy::new(|| Mutex::new(Running::default()));
@@ -61,6 +62,7 @@ mod native {
             if child.try_wait().ok().flatten().is_some() {
                 state.child = None;
                 state.port = None;
+                state.transport = None;
             }
         }
         if state.child.is_some() {
@@ -77,6 +79,7 @@ mod native {
                 let _ = child.wait();
             }
             state.port = None;
+            state.transport = None;
         }
         crate::net::refresh_client();
     }
@@ -85,11 +88,13 @@ mod native {
         let registered = config_path(app).ok().is_some_and(|p| registered(&p));
         let available = binary_path(app).is_ok();
         let running = proxy_url().is_some();
+        let transport = RUNNING.lock().ok().and_then(|state| state.transport);
         json!({
             "available": available,
             "registered": registered,
             "running": running,
             "active": running && crate::net::proxy_state()["mode"] == "warp",
+            "transport": transport,
             "mode": crate::net::proxy_state()["mode"],
         })
     }
@@ -139,6 +144,58 @@ mod native {
         Ok(())
     }
 
+    async fn start_and_verify(
+        binary: &Path, config: &Path, use_http2: bool,
+    ) -> Result<(Child, u16), String> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|_| "无法分配 WARP 本地端口")?;
+        let port = listener.local_addr().map_err(|_| "无法读取 WARP 本地端口")?.port();
+        drop(listener);
+
+        let mut command = Command::new(binary);
+        command.arg("-c").arg(config)
+            .arg("http-proxy")
+            .arg("-b").arg("127.0.0.1")
+            .arg("-p").arg(port.to_string())
+            .arg("--always-reconnect");
+        if use_http2 {
+            command.arg("--http2");
+        }
+        let mut child = command
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+            .spawn().map_err(|_| "无法启动内置 WARP 组件")?;
+
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut ready = false;
+        for _ in 0..40 {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => (),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("无法获取 WARP 本地进程状态".into());
+                }
+            }
+            if tokio::net::TcpStream::connect(address).await.is_ok() {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(125)).await;
+        }
+
+        let local_url = format!("http://127.0.0.1:{port}");
+        let checked = if ready { verify_tunnel(&local_url).await } else {
+            Err("WARP 进程未能启动本地代理".into())
+        };
+        if let Err(error) = checked {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        Ok((child, port))
+    }
+
     pub async fn enable(app: tauri::AppHandle, accept_terms: bool) -> Result<Value, String> {
         let _start_guard = START.lock().await;
         let binary = binary_path(&app)?;
@@ -150,63 +207,39 @@ mod native {
             register(&binary, &config).await?;
         }
         if proxy_url().is_some() {
-            crate::net::set_proxy("warp", "")?;
+            crate::net::proxy_set("warp", "")?;
             return Ok(status(&app));
         }
 
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .map_err(|_| "无法分配 WARP 本地端口")?;
-        let port = listener.local_addr().map_err(|_| "无法读取 WARP 本地端口")?.port();
-        drop(listener);
-        let mut child = Command::new(&binary)
-            .arg("-c").arg(&config)
-            .arg("http-proxy")
-            .arg("-b").arg("127.0.0.1")
-            .arg("-p").arg(port.to_string())
-            .arg("--always-reconnect")
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| "无法启动内置 WARP 组件")?;
-
-        let address = SocketAddr::from(([127, 0, 0, 1], port));
-        let mut ready = false;
-        for _ in 0..40 {
-            if child.try_wait().map_err(|_| "无法读取 WARP 进程状态")?.is_some() {
-                break;
+        // First try MASQUE over QUIC/UDP; if the Wi-Fi blocks UDP, retry HTTP/2 TCP.
+        // A broken transport is killed before the next attempt, and no direct
+        // traffic is silently substituted when the user has chosen WARP.
+        let mut last_error = String::from("WARP 服务暂时不可达");
+        for use_http2 in [false, true] {
+            match start_and_verify(&binary, &config, use_http2).await {
+                Ok((child, port)) => {
+                    {
+                        let mut state = RUNNING.lock().map_err(|_| "WARP 进程锁失败")?;
+                        state.child = Some(child);
+                        state.port = Some(port);
+                        state.transport = Some(if use_http2 { "HTTP/2-TCP" } else { "MASQUE-QUIC" });
+                    }
+                    if let Err(error) = crate::net::proxy_set("warp", "") {
+                        shutdown();
+                        return Err(error);
+                    }
+                    return Ok(status(&app));
+                }
+                Err(error) => last_error = error,
             }
-            if tokio::net::TcpStream::connect(address).await.is_ok() {
-                ready = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(125)).await;
         }
-
-        let proxy = format!("http://127.0.0.1:{port}");
-        let checked = if ready { verify_tunnel(&proxy).await } else {
-            Err("WARP 本地连接未启动".into())
-        };
-        if let Err(error) = checked {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-
-        {
-            let mut state = RUNNING.lock().map_err(|_| "WARP 进程锁失败")?;
-            state.child = Some(child);
-            state.port = Some(port);
-        }
-        if let Err(error) = crate::net::set_proxy("warp", "") {
-            shutdown();
-            return Err(error);
-        }
-        Ok(status(&app))
+        Err(format!("WARP 的 QUIC 与 HTTP/2 网络通道均不可用：{last_error}"))
     }
 
     pub async fn disable(app: tauri::AppHandle) -> Result<Value, String> {
         let _start_guard = START.lock().await;
         // Reset transport first so we never route more requests to a stopped proxy.
-        crate::net::set_proxy("system", "")?;
+        crate::net::proxy_set("system", "")?;
         shutdown();
         Ok(status(&app))
     }
