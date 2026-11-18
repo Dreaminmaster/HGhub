@@ -66,6 +66,38 @@ jobs:
       - name: 安装前端依赖
         run: pnpm install --frozen-lockfile
 
+      # 固定 usque v4.2.1 的上游代码提交，CI 自行编译；安装包运行时不下载可执行文件。
+      # 仅 Mac 打包此 MIT 许可组件，iOS/Android/Windows 构建不受影响。
+      - name: 安装 Go 用于构建内置 WARP
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.3'
+          cache: false
+
+      - name: 编译固定版本 usque (macOS Universal)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v4.2.1 \
+            https://github.com/Diniboy1123/usque.git "$RUNNER_TEMP/usque"
+          test "$(git -C "$RUNNER_TEMP/usque" rev-parse HEAD)" = "6aa03fc97d12848dce34eedbd187fb1077b5d1ea"
+          mkdir -p src-tauri/resources
+          (
+            cd "$RUNNER_TEMP/usque"
+            CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
+              -o "$GITHUB_WORKSPACE/src-tauri/resources/usque_amd64" .
+            CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" \
+              -o "$GITHUB_WORKSPACE/src-tauri/resources/usque_arm64" .
+          )
+          lipo -create -output src-tauri/resources/usque \
+            src-tauri/resources/usque_amd64 src-tauri/resources/usque_arm64
+          lipo -info src-tauri/resources/usque
+          chmod 755 src-tauri/resources/usque
+          codesign --force --sign - --timestamp=none src-tauri/resources/usque
+          cp "$RUNNER_TEMP/usque/LICENSE.md" src-tauri/resources/LICENSE-usque.txt
+          shasum -a 256 src-tauri/resources/usque
+          # The final application bundles resources/usque (not the temporary arch files).
+
       - name: 构建 macOS 应用 (DMG + APP)
         run: |
           pnpm tauri build --config src-tauri/tauri.macos.conf.json --target ${{ matrix.target }}
