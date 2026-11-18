@@ -102,13 +102,12 @@ mod native {
             .open(config).map_err(|_| "WARP 凭据文件已存在但无效；为防止覆盖，请先备份并处理该文件")?;
         drop(created);
 
-        let command = tokio::process::Command::new(binary)
-            .arg("-c").arg(config)
+        let mut command = tokio::process::Command::new(binary);
+        command.arg("-c").arg(config)
             .arg("register").arg("--accept-tos")
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-            .kill_on_drop(true)
-            .status();
-        let result = tokio::time::timeout(Duration::from_secs(50), command).await;
+            .kill_on_drop(true);
+        let result = tokio::time::timeout(Duration::from_secs(50), command.status()).await;
         let ok = matches!(result, Ok(Ok(code)) if code.success()) && registered(config);
         if !ok {
             let _ = fs::remove_file(config);
