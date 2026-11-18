@@ -8,6 +8,7 @@ mod net;
 mod network_policy;
 mod playback_log;
 mod session;
+mod warp;
 
 use api::Api;
 use tauri::Manager;
@@ -58,6 +59,9 @@ pub fn run() {
                 // 上次选择的线路（设置 → 线路）在启动时恢复
                 net::bind_base(&dir);
                 playback_log::bind(&dir);
+                // An existing, explicitly authorized WARP mode may reconnect on launch.
+                // Fresh installs never register or connect without a user action.
+                warp::restore(app.handle().clone());
                 let state: tauri::State<Api> = app.state();
                 state.session.bind(dir);
             }
@@ -141,6 +145,9 @@ pub fn run() {
             api::net_diag,
             api::proxy_state,
             api::proxy_set,
+            warp::warp_status,
+            warp::warp_enable,
+            warp::warp_disable,
             api::line_state,
             api::line_set,
             api::line_mirrors,
@@ -170,6 +177,11 @@ pub fn run() {
             api::api_collect,
             api::api_follow,
         ])
+        .on_window_event(|_, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                warp::shutdown();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
