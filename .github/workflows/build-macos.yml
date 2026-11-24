@@ -100,6 +100,16 @@ jobs:
           shasum -a 256 src-tauri/resources/usque
           # The final application bundles resources/usque (not the temporary arch files).
 
+      - name: Rust 回归测试（PR）
+        if: github.event_name == 'pull_request' && matrix.arch == 'x64'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
+
+      - name: 首页故障回归测试（PR）
+        if: github.event_name == 'pull_request' && matrix.arch == 'x64'
+        run: |
+          pnpm exec playwright-core install chromium
+          node scripts/test-api-loading.mjs
+
       - name: 构建 macOS 应用 (DMG + APP)
         run: |
           pnpm tauri build --config src-tauri/tauri.macos.conf.json --target ${{ matrix.target }}

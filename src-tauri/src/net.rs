@@ -1014,7 +1014,9 @@ async fn edge_once(
                         continue;
                     }
                     if status.as_u16() == 401 || status.as_u16() == 403 {
-                        return Err("401".to_string());
+                        // Preserve the actual status for the read-only diagnostic;
+                        // normal business calls retain the legacy session handling.
+                        return Err(if allow_retry { "401".to_string() } else { format!("HTTP {status}") });
                     }
                     if !status.is_success() {
                         // Never log raw upstream HTML or response bodies, which may contain user data.

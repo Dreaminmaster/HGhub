@@ -39,13 +39,14 @@ try {
   await page.waitForFunction(() => window.apiLoadingFixture.history.length === 2);
   await complete("api_feed", "", "503");
   await visible(page.getByText(/内容服务暂不可用（HTTP 503）/).first());
-  await visible(page.getByRole("button", { name: "检测连接", exact: true }));
+  await page.getByRole("button", { name: "检测连接", exact: true }).click();
+  await visible(page.getByRole("status").filter({ hasText: "内置 WARP；网页 HTTP 200；内容接口 HTTP 503" }));
   await page.getByRole("button", { name: "重试", exact: true }).click();
   await page.waitForFunction(() => window.apiLoadingFixture.history.length === 3);
   await complete("api_feed", "", "empty");
   await visible(page.getByText("暂无视频", { exact: true }));
   assert.equal(await page.locator(".spinner").count(), 0);
-  report.passed.push("Home: 404 ends loading, readable error, explicit retry, empty result");
+  report.passed.push("Home: 404/503 end loading, distinct errors, real API vs homepage diagnostic, explicit retry, empty result");
 
   await page.goto(`${origin}tests/api-loading.html`);
   await page.waitForFunction(() => window.apiLoadingFixture.ready);
