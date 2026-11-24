@@ -763,7 +763,8 @@ fn retryable_error(error: &str) -> bool {
         return false;
     }
     if let Some(status) = http_error_status(error) {
-        return matches!(status, 408 | 425 | 429 | 500..=599);
+        // A rate limit is not a request to retry immediately.
+        return matches!(status, 408 | 425 | 500..=599);
     }
     !matches!(
         crate::playback_log::error_kind(error),
@@ -790,12 +791,16 @@ where
             Ok(v) => return Ok(v),
             Err(e) => {
                 last = e;
-                if !retryable_error(&last) {
+                let unavailable = http_error_status(&last) == Some(503);
+                // 503: at most one retry on the same origin. A new origin is still
+                // subject to the existing anonymous-read/trusted-source policy.
+                if !retryable_error(&last) || (unavailable && attempt >= 1) {
                     return Err(last);
                 }
                 heal_client(&last);
                 if attempt + 1 < attempts {
-                    tokio::time::sleep(Duration::from_millis(350 * (attempt as u64 + 1))).await;
+                    let delay_ms = if unavailable { 1500 } else { 350 * (attempt as u64 + 1) };
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }
             }
         }
@@ -1135,6 +1140,18 @@ pub async fn fetch_bytes(url: &str) -> Result<(Option<String>, Vec<u8>), String>
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn unavailable_origin_is_not_retried_indefinitely() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let result = with_retry(true, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>("HTTP 503 Service Unavailable".to_string())
+        }).await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
     #[test]
     fn feed_shape_requires_items_array_and_fallback_respects_credentials() {
         assert!(valid_feed(&json!({"items":[]})));
@@ -1167,6 +1184,7 @@ mod tests {
         for error in [
             "HTTP 404 Not Found: <html>nginx</html>",
             "HTTP 403 Forbidden",
+            "HTTP 429 Too Many Requests",
             "401",
             "禁止访问内网",
             "重定向次数超过限制",
