@@ -51,11 +51,29 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
     // 落盘完整错误链（dns error / connection refused / 证书错误…），toast 只显示截断版
     logLine(`[api] ${cmd} → ${msg}`);
     const status = /^HTTP (\d{3})\b/.exec(msg)?.[1];
+    if (status === "503") {
+      throw new Error("内容服务暂不可用（HTTP 503）。这不一定是代理故障，暂时不要反复切换网络。");
+    }
     if (status) {
-      throw new Error(`服务器请求失败（HTTP ${status}），请稍后重试或在设置中切换线路`);
+      throw new Error(`服务器请求失败（HTTP ${status}），请稍后重试或检查连接`);
     }
     throw new Error(msg.length > 140 ? `${msg.slice(0, 140)}…` : msg);
   }
+}
+
+export function describeNetworkDiagnostic(res: Record<string, unknown>): string {
+  const http = res.http as { status?: number } | undefined;
+  const check = res.api as { ok?: boolean; ms?: number; status?: number; error_kind?: string } | undefined;
+  const proxy = res.proxy as { mode?: string } | undefined;
+  const mode = ({ system: "跟随系统", direct: "直连", custom: "手动代理", warp: "内置 WARP" } as Record<string, string>)[proxy?.mode || ""] || "未知";
+  const homepage = http?.status ? "网页 HTTP " + http.status : "网页未响应";
+  const labels: Record<string, string> = {
+    timeout: "检测超时", dns_error: "DNS 解析失败", transport_error: "连接失败或服务拒绝",
+    unexpected_api_response: "接口返回网页或无效 JSON", unexpected_feed_format: "内容数据格式不符合旧版协议",
+  };
+  const api = check?.ok ? "内容接口正常" : check?.status ? "内容接口 HTTP " + check.status :
+    "内容接口未通过：" + (labels[check?.error_kind || ""] || check?.error_kind || "未知");
+  return mode + "；" + homepage + "；" + api + (check?.status === 503 ? "。服务暂不可用，无法仅凭此判断是出口还是源站故障。" : "。");
 }
 
 /* ── 接口 ───────────────────────────────────────────────── */

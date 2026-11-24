@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { api, APP_VERSION, hostOf, logLine, platform, type UpdateInfo, type ProxyState, type WarpStatus } from "../api";
+import { api, describeNetworkDiagnostic, APP_VERSION, hostOf, logLine, platform, type UpdateInfo, type ProxyState, type WarpStatus } from "../api";
 import { useStore } from "../store";
 import { Modal, Toggle } from "../components/ui";
 import LinePicker from "../components/LinePicker";
@@ -315,18 +315,7 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
                   onClick={() => {
                     setProxyBusy(true);
                     void api.netDiag().then(res => {
-                      const http = res.http as { status?: number; error?: string } | undefined;
-                      const checkedApi = res.api as { ok?: boolean; ms?: number; error_kind?: string } | undefined;
-                      if (checkedApi?.ok) {
-                        setProxyResult("真实内容接口正常（" + checkedApi.ms + "ms），首页 HTTP " + (http?.status || "未知"));
-                      } else if (checkedApi) {
-                        setProxyResult("首页 HTTP " + (http?.status || "不可用") +
-                          "；内容接口检测失败（" + (checkedApi.error_kind || "未知错误") +
-                          "）。应用会对匿名读取尝试可信备用线路。");
-                      } else {
-                        setProxyResult(http?.status ? "网站首页响应：HTTP " + http.status :
-                          http?.error ? "连接失败：" + http.error : "检测完成");
-                      }
+                      setProxyResult(describeNetworkDiagnostic(res));
                     }).catch(e => setProxyResult((e as Error).message || "检测失败"))
                       .finally(() => setProxyBusy(false));
                   }}

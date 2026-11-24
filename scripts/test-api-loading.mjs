@@ -37,6 +37,11 @@ try {
   assert(!await page.locator("body").innerText().then(s => s.includes("<html>")), "Hide gateway HTML from UI");
   await page.getByRole("button", { name: "重试", exact: true }).click();
   await page.waitForFunction(() => window.apiLoadingFixture.history.length === 2);
+  await complete("api_feed", "", "503");
+  await visible(page.getByText(/内容服务暂不可用（HTTP 503）/).first());
+  await visible(page.getByRole("button", { name: "检测连接", exact: true }));
+  await page.getByRole("button", { name: "重试", exact: true }).click();
+  await page.waitForFunction(() => window.apiLoadingFixture.history.length === 3);
   await complete("api_feed", "", "empty");
   await visible(page.getByText("暂无视频", { exact: true }));
   assert.equal(await page.locator(".spinner").count(), 0);

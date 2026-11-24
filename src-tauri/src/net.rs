@@ -687,13 +687,16 @@ pub async fn diagnose() -> Value {
     let api_started = Instant::now();
     let api_result = tokio::time::timeout(
         Duration::from_secs(12),
-        edge_once(&cur, "GET", "/api/videos?page=1&size=1", None, None)
+        edge_once(&cur, "GET", "/api/videos?page=1&size=1", None, None, false)
     ).await;
     let api_check = match api_result {
-        Ok(Ok(_)) => json!({"ok":true, "ms":api_started.elapsed().as_millis() as u64}),
+        Ok(Ok(value)) if value.get("items").and_then(Value::as_array).is_some() =>
+            json!({"ok":true, "ms":api_started.elapsed().as_millis() as u64}),
+        Ok(Ok(_)) => json!({"ok":false, "ms":api_started.elapsed().as_millis() as u64, "error_kind":"unexpected_feed_format"}),
         Ok(Err(error)) => json!({
             "ok":false, "ms":api_started.elapsed().as_millis() as u64,
             "error_kind":crate::playback_log::error_kind(&error),
+            "status":http_error_status(&error),
         }),
         Err(_) => json!({"ok":false, "ms":api_started.elapsed().as_millis() as u64, "error_kind":"timeout"}),
     };
@@ -728,15 +731,22 @@ pub async fn diagnose() -> Value {
     })
 }
 
+/// Accept both reqwest's "HTTP 503 Service Unavailable" and "HTTP 503: ...".
+fn http_error_status(error: &str) -> Option<u16> {
+    let suffix = error.strip_prefix("HTTP ")?;
+    let code = suffix.get(..3)?;
+    if !code.bytes().all(|b| b.is_ascii_digit()) ||
+        suffix.as_bytes().get(3).is_some_and(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    code.parse().ok()
+}
+
 fn retryable_error(error: &str) -> bool {
     if error == "401" {
         return false;
     }
-    if let Some(status) = error
-        .strip_prefix("HTTP ")
-        .and_then(|s| s.split_whitespace().next())
-        .and_then(|s| s.parse::<u16>().ok())
-    {
+    if let Some(status) = http_error_status(error) {
         return matches!(status, 408 | 425 | 429 | 500..=599);
     }
     !matches!(
@@ -745,6 +755,7 @@ fn retryable_error(error: &str) -> bool {
             | "private_address_denied"
             | "target_policy_denied"
             | "redirect_error"
+            | "unexpected_api_response"
     )
 }
 
@@ -826,9 +837,7 @@ fn automatic_backup(origin: &str) -> Option<&'static str> {
 
 /// 仅网络或临时网关故障可触发备用，不把鉴权失败、业务错误或 TLS 证书拒绝当作“被屏蔽”。
 fn temporary_route_error(error: &str) -> bool {
-    if let Some(status) = error.strip_prefix("HTTP ")
-        .and_then(|v| v.split(|c: char| !c.is_ascii_digit()).next())
-        .and_then(|v| v.parse::<u16>().ok()) {
+    if let Some(status) = http_error_status(error) {
         return matches!(status, 408 | 502 | 503 | 504 | 520..=524);
     }
     let msg = error.to_ascii_lowercase();
@@ -872,23 +881,26 @@ pub async fn edge(
     body: Option<Value>,
     token: Option<&str>,
 ) -> Result<Value, String> {
-    let first = edge_once(origin, method, path, body.clone(), token).await;
+    let first = edge_once(origin, method, path, body.clone(), token, true).await;
     match first {
         Err(first_error) if may_recover_with_backup(origin, method, path, body.is_some(), token.is_some(), &first_error) => {
             let backup = automatic_backup(origin).expect("经过备用线路白名单验证");
             crate::playback_log::record("api.trusted_fallback", json!({
                 "operation": edge_operation(path), "from": origin, "to": backup,
             }));
-            match edge_once(backup, method, path, body, None).await {
+            match edge_once(backup, method, path, body, None, true).await {
                 Ok(value) => {
                     crate::playback_log::record("api.trusted_fallback_success", json!({
                         "operation": edge_operation(path), "source": backup,
                     }));
                     Ok(value)
                 }
-                Err(_) => {
+                Err(backup_error) => {
                     crate::playback_log::record("api.trusted_fallback_failed", json!({
                         "operation": edge_operation(path),
+                        "primary_status": http_error_status(&first_error),
+                        "backup_status": http_error_status(&backup_error),
+                        "backup_error_kind": crate::playback_log::error_kind(&backup_error),
                     }));
                     // 避免把备用站点的未知错误覆盖到用户实际选择的线路。
                     Err(first_error)
@@ -906,6 +918,7 @@ async fn edge_once(
     path: &str,
     body: Option<Value>,
     token: Option<&str>,
+    allow_retry: bool,
 ) -> Result<Value, String> {
     let cur = normalize_base(origin).ok_or("业务请求必须使用安全 HTTPS 线路")?;
     if network_policy::strict_security()
@@ -947,8 +960,8 @@ async fn edge_once(
     let mut attempt = 0;
     let guest_get = method.eq_ignore_ascii_case("GET") && body.is_none() && token.is_none();
     // 取播放地址的 POST 没有副作用，和 GET 一样允许重试
-    let can_retry = (method.eq_ignore_ascii_case("GET") && body.is_none())
-        || (method.eq_ignore_ascii_case("POST") && operation == "play");
+    let can_retry = allow_retry && ((method.eq_ignore_ascii_case("GET") && body.is_none())
+        || (method.eq_ignore_ascii_case("POST") && operation == "play"));
     let value = with_retry(can_retry, || {
         attempt += 1;
         let attempt = attempt;
@@ -1000,21 +1013,22 @@ async fn edge_once(
                         next = edge_redirect_target(&target, status.as_u16(), location, guest_get)?;
                         continue;
                     }
-                    let text = resp.text().await.map_err(|e| err_text(&e))?;
                     if status.as_u16() == 401 || status.as_u16() == 403 {
                         return Err("401".to_string());
                     }
                     if !status.is_success() {
-                        return Err(format!(
-                            "HTTP {status}: {}",
-                            text.chars().take(160).collect::<String>()
-                        ));
+                        // Never log raw upstream HTML or response bodies, which may contain user data.
+                        return Err(format!("HTTP {status}"));
                     }
+                    if response_kind == "html" {
+                        return Err("内容接口返回网页而非 JSON".into());
+                    }
+                    let text = resp.text().await.map_err(|e| err_text(&e))?;
                     if text.trim().is_empty() {
                         return Ok(Value::Null);
                     }
                     return serde_json::from_str::<Value>(&text)
-                        .map_err(|e| format!("{e}: {}", text.chars().take(160).collect::<String>()));
+                        .map_err(|_| "内容接口返回无效 JSON".to_string());
                 }
                 Err("重定向次数超过限制".into())
             }.await;
@@ -1092,6 +1106,18 @@ pub async fn fetch_bytes(url: &str) -> Result<(Option<String>, Vec<u8>), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_parsing_accepts_colon_and_reason_phrase() {
+        assert_eq!(http_error_status("HTTP 503: gateway"), Some(503));
+        assert_eq!(http_error_status("HTTP 503 Service Unavailable"), Some(503));
+        assert_eq!(http_error_status("HTTP 5030"), None);
+        assert!(!retryable_error("HTTP 403: denied"));
+        assert!(!retryable_error("HTTP 404: missing"));
+        assert!(retryable_error("HTTP 503: unavailable"));
+        assert!(!retryable_error("内容接口返回网页而非 JSON"));
+        assert!(!retryable_error("内容接口返回无效 JSON"));
+    }
 
     #[tokio::test]
     async fn terminal_errors_do_not_retry_but_transient_failures_can_recover() {
