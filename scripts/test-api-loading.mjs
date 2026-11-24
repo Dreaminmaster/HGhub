@@ -40,7 +40,7 @@ try {
   await complete("api_feed", "", "503");
   await visible(page.getByText(/内容服务暂不可用（HTTP 503）/).first());
   await page.getByRole("button", { name: "检测连接", exact: true }).click();
-  await visible(page.getByRole("status").filter({ hasText: "内置 WARP；网页 HTTP 200；内容接口 HTTP 503" }));
+  await visible(page.getByRole("status").filter({ hasText: "内置 WARP；网页 HTTP 200；内容接口 HTTP 503；备用线路：HTTP 502" }));
   await page.getByRole("button", { name: "重试", exact: true }).click();
   await page.waitForFunction(() => window.apiLoadingFixture.history.length === 3);
   await complete("api_feed", "", "empty");

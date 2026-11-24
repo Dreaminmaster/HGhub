@@ -101,11 +101,11 @@ jobs:
           # The final application bundles resources/usque (not the temporary arch files).
 
       - name: Rust 回归测试（PR）
-        if: github.event_name == 'pull_request' && matrix.arch == 'x64'
+        if: github.ref != 'refs/heads/main' && matrix.arch == 'x64'
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
 
       - name: 首页故障回归测试（PR）
-        if: github.event_name == 'pull_request' && matrix.arch == 'x64'
+        if: github.ref != 'refs/heads/main' && matrix.arch == 'x64'
         run: |
           pnpm exec playwright-core install chromium
           node scripts/test-api-loading.mjs
@@ -162,7 +162,7 @@ jobs:
 
   publish-release:
     name: 发布 GitHub Release
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: [macos]
     runs-on: ubuntu-latest
     permissions:

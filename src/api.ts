@@ -73,7 +73,11 @@ export function describeNetworkDiagnostic(res: Record<string, unknown>): string 
   };
   const api = check?.ok ? "内容接口正常" : check?.status ? "内容接口 HTTP " + check.status :
     "内容接口未通过：" + (labels[check?.error_kind || ""] || check?.error_kind || "未知");
-  return mode + "；" + homepage + "；" + api + (check?.status === 503 ? "。服务暂不可用，无法仅凭此判断是出口还是源站故障。" : "。");
+  const backup = res.backup as { origin?: string; api?: LineApiProbe } | null | undefined;
+  const secondary = backup?.api
+    ? "；备用线路：" + (backup.api.ok ? "内容接口正常" : backup.api.status ? "HTTP " + backup.api.status : labels[backup.api.error_kind || ""] || "检测未通过")
+    : "";
+  return mode + "；" + homepage + "；" + api + secondary + (check?.status === 503 ? "。服务暂不可用，无法仅凭此判断是出口还是源站故障。" : "。");
 }
 
 /* ── 接口 ───────────────────────────────────────────────── */
@@ -161,7 +165,8 @@ export type ProxyState = { mode: "system" | "direct" | "custom" | "warp"; url: s
 export type WarpStatus = { available: boolean; registered: boolean; running: boolean; active: boolean; transport?: string | null; mode?: string };
 export type LineState = { base: string; default: string; fixed: LineItem[] };
 export type LineMirrors = { source: string; script?: string; items: LineItem[] };
-export type LineProbe = { url: string; ok: boolean; status?: number; ms: number; error?: string };
+export type LineApiProbe = { ok: boolean; ms?: number; status?: number | null; error_kind?: string };
+export type LineProbe = { url: string; ok: boolean; status?: number | null; ms: number; error?: string | null; website_ok?: boolean; api?: LineApiProbe | null };
 
 /** `https://a.b/c` → `a.b`（线路展示用） */
 export const hostOf = (url: string) => {

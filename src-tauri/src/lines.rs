@@ -87,23 +87,30 @@ pub async fn probe(urls: Vec<String>) -> Value {
 }
 
 async fn probe_one(url: String) -> Value {
-    let target = format!("{}/", url.trim_end_matches('/'));
+    let Some(origin) = crate::net::normalize_base(&url) else {
+        return json!({"url":url,"ok":false,"ms":0,"error":"无效 HTTPS 线路"});
+    };
+    let target = format!("{origin}/");
     let started = Instant::now();
-    let res = crate::net::get(
-        &target,
-        PROBE_TIMEOUT,
-        Some("text/html,application/xhtml+xml"),
-        None,
-    )
-    .await;
-    let ms = started.elapsed().as_millis() as u64;
-    match res {
-        Ok(r) => {
-            let status = r.status().as_u16();
-            json!({ "url": url, "ok": status < 400, "status": status, "ms": ms })
+    // Only fixed origins receive content API requests during line-list diagnostics.
+    // Third-party mirror rows remain explicitly website-only, not API-verified.
+    let (res, api) = tokio::join!(
+        crate::net::get(&target, PROBE_TIMEOUT, Some("text/html,application/xhtml+xml"), None),
+        async {
+            if FIXED.iter().any(|(_, fixed)| *fixed == origin.as_str()) {
+                crate::net::probe_content(&origin).await
+            } else {
+                Value::Null
+            }
         }
-        Err(e) => json!({ "url": url, "ok": false, "ms": ms, "error": e }),
-    }
+    );
+    let ms = started.elapsed().as_millis() as u64;
+    let status = res.as_ref().ok().map(|r| r.status().as_u16());
+    let website_ok = status.is_some_and(|code| (200..300).contains(&code));
+    let ok = if api.is_null() { website_ok } else { api["ok"] == true };
+    json!({"url":url,"ok":ok,"status":status,"website_ok":website_ok,
+        "api":api,"ms":ms,"error":res.err()})
+
 }
 
 async fn get_text(url: &str) -> Result<String, String> {

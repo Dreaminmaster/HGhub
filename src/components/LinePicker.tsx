@@ -21,9 +21,9 @@ function Row({ item, current, probe, busy, disabled, onPick, onProbe }: {
         <div className="text-[10.5px] text-mut truncate mt-0.5">{item.url}</div>
       </button>
       <span
-        title={probe ? (probe.error || (probe.status ? `HTTP ${probe.status}` : "")) : ""}
-        className={`text-[10.5px] tabular-nums shrink-0 ${probe ? (probe.ok ? "text-mint" : "text-danger") : "text-dim"}`}>
-        {busy ? "…" : probe ? (probe.ok ? `${probe.ms}ms` : probe.status ? `HTTP ${probe.status}` : "失败") : "—"}
+        title={probe ? ["网页：" + (probe.status ? "HTTP " + probe.status : "未响应"), probe.api ? "内容接口：" + (probe.api.ok ? "正常" : probe.api.status ? "HTTP " + probe.api.status : "检测失败") : "内容接口未检测"].join("；") : ""}
+        className={`text-[10.5px] tabular-nums shrink-0 ${probe?.api ? (probe.api.ok ? "text-mint" : "text-danger") : "text-dim"}`}>
+        {busy ? "…" : probe?.api ? (probe.api.ok ? "接口正常" : probe.api.status ? `接口 ${probe.api.status}` : "接口异常") : probe ? (probe.website_ok ? "仅网页可达" : probe.status ? `网页 ${probe.status}` : "网页失败") : "—"}
       </span>
       <button onClick={() => onProbe(item.url)} disabled={busy || disabled}
         className="shrink-0 h-7 px-2.5 rounded-(--r-sm) bg-s4 text-[11px] text-on/80 pressable disabled:opacity-50">检测</button>
@@ -165,7 +165,7 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
         )}
 
         <div className="text-[10px] text-dim leading-relaxed px-1 mt-4">
-          切换后立即生效，请求链路与数据模型不变。不做自动检测 / 自动切换，只有点「检测」时才探测一次。
+          固定线路同时检测内容接口；镜像仅检测网页，不代表能够播放。检测不会自动更改线路或账号。
         </div>
       </div>
     </div>

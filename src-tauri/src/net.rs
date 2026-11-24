@@ -649,6 +649,28 @@ fn dns_summary(addrs: impl IntoIterator<Item = SocketAddr>) -> Value {
 }
 
 /// 网络自检：DNS / HTTP / 代理相关环境变量，用于远程定位「打不开」。
+/// One anonymous, bounded, read-only legacy API check, with no fallback or retries.
+pub async fn probe_content(origin: &str) -> Value {
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(12),
+        edge_once(origin, "GET", "/api/videos?page=1&size=1", None, None, false),
+    ).await;
+    let ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(Ok(value)) if valid_feed(&value) => json!({"ok":true,"ms":ms}),
+        Ok(Ok(_)) => json!({"ok":false,"ms":ms,"error_kind":"unexpected_feed_format"}),
+        Ok(Err(error)) => json!({"ok":false,"ms":ms,
+            "error_kind":crate::playback_log::error_kind(&error),
+            "status":http_error_status(&error)}),
+        Err(_) => json!({"ok":false,"ms":ms,"error_kind":"timeout"}),
+    }
+}
+
+fn valid_feed(value: &Value) -> bool {
+    value.get("items").and_then(Value::as_array).is_some()
+}
+
 pub async fn diagnose() -> Value {
     let cur = base();
     let host = url::Url::parse(&cur)
@@ -682,29 +704,23 @@ pub async fn diagnose() -> Value {
         }),
     };
 
-    // 首页 HTTP 200 并不等于内容接口正常；额外检测匿名列表的真实 API。
-    // 使用用户选中的主线路，诊断不自动代替主线路，最长耗时 12 秒。
-    let api_started = Instant::now();
-    let api_result = tokio::time::timeout(
-        Duration::from_secs(12),
-        edge_once(&cur, "GET", "/api/videos?page=1&size=1", None, None, false)
-    ).await;
-    let api_check = match api_result {
-        Ok(Ok(value)) if value.get("items").and_then(Value::as_array).is_some() =>
-            json!({"ok":true, "ms":api_started.elapsed().as_millis() as u64}),
-        Ok(Ok(_)) => json!({"ok":false, "ms":api_started.elapsed().as_millis() as u64, "error_kind":"unexpected_feed_format"}),
-        Ok(Err(error)) => json!({
-            "ok":false, "ms":api_started.elapsed().as_millis() as u64,
-            "error_kind":crate::playback_log::error_kind(&error),
-            "status":http_error_status(&error),
-        }),
-        Err(_) => json!({"ok":false, "ms":api_started.elapsed().as_millis() as u64, "error_kind":"timeout"}),
-    };
+    // Compare only the two built-in trusted origins; no account credentials or changes to selection.
+    let (api_check, backup_check) = tokio::join!(
+        probe_content(&cur),
+        async {
+            if let Some(origin) = automatic_backup(&cur) {
+                json!({"origin":origin,"api":probe_content(origin).await})
+            } else {
+                Value::Null
+            }
+        }
+    );
 
     json!({
         "base": cur,
         "host": host,
         "api": api_check,
+        "backup": backup_check,
         "auto_line_recovery": "仅匿名 GET 遇到网络或临时网关故障时尝试两条内置固定线路",
         "secure_dns": {
             "mode": "automatic_fallback_on_local_dns_error",
@@ -867,9 +883,12 @@ fn may_recover_with_backup(
     // 只读播放地址查询虽然使用 POST，但无副作用（项目原有重试策略已明确）。
     let safe_read = (method.eq_ignore_ascii_case("GET") && !has_body)
         || (method.eq_ignore_ascii_case("POST") && edge_operation(path) == "play");
+    let incompatible_feed = edge_operation(path) == "feed"
+        && method.eq_ignore_ascii_case("GET")
+        && error.starts_with("内容接口返回");
     automatic_backup(origin).is_some()
         && safe_read && !has_token
-        && temporary_route_error(error)
+        && (temporary_route_error(error) || incompatible_feed)
 }
 
 /// 默认自动恢复：匿名读取或只读的播放地址查询失败时，尝试另一条内置固定线路。
@@ -1049,11 +1068,18 @@ async fn edge_once(
     .await?;
 
     if value.is_null() {
+        if operation == "feed" {
+            return Err("内容接口返回空响应，无法读取首页".into());
+        }
         return Ok(Value::Null);
     }
 
     if value.get("status").and_then(|v| v.as_i64()) == Some(1) {
-        Ok(value.get("data").cloned().unwrap_or(Value::Null))
+        let data = value.get("data").cloned().unwrap_or(Value::Null);
+        if operation == "feed" && !valid_feed(&data) {
+            return Err("内容接口返回不兼容的首页数据格式".into());
+        }
+        Ok(data)
     } else {
         Err(value
             .get("msg")
@@ -1108,6 +1134,20 @@ pub async fn fetch_bytes(url: &str) -> Result<(Option<String>, Vec<u8>), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feed_shape_requires_items_array_and_fallback_respects_credentials() {
+        assert!(valid_feed(&json!({"items":[]})));
+        assert!(!valid_feed(&Value::Null));
+        assert!(!valid_feed(&json!({"items":{}})));
+        assert!(!valid_feed(&json!({"other":[]})));
+        let path = "/api/videos?page=1&size=1";
+        let error = "内容接口返回不兼容的首页数据格式";
+        assert!(may_recover_with_backup("https://huangguoai.com", "GET", path, false, false, error));
+        assert!(!may_recover_with_backup("https://huangguoai.com", "GET", path, false, true, error));
+        assert!(!may_recover_with_backup("https://huangguoai.com", "POST", path, true, false, error));
+        assert!(!may_recover_with_backup("https://untrusted.invalid", "GET", path, false, false, error));
+    }
 
     #[test]
     fn status_parsing_accepts_colon_and_reason_phrase() {

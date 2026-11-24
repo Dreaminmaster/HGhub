@@ -40,6 +40,7 @@ Object.assign(window, {
     if (cmd === "net_diag") return Promise.resolve({
       http: { status: 200 }, api: { ok: false, status: 503, error_kind: "http_error" },
       proxy: { mode: "warp" },
+      backup: { origin: "https://fixture.invalid", api: { ok: false, status: 502 } },
     });
     if (!["api_feed", "api_category", "api_posts"].includes(cmd)) return Promise.reject(`Unexpected IPC: ${cmd}`);
     fixture.history.push({ cmd, args });
