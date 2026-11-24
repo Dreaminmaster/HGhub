@@ -678,34 +678,32 @@ pub async fn diagnose() -> Value {
         .and_then(|u| u.host_str().map(|h| h.to_string()))
         .unwrap_or_default();
 
-    // fake-ip（198.18.0.0/15）说明 DNS 被 TUN 接管：关掉 TUN 后这个地址根本不可路由。
-    let dns = {
-        let host = host.clone();
-        tokio::task::spawn_blocking(move || {
-            use std::net::ToSocketAddrs;
-            match (host.as_str(), 443u16).to_socket_addrs() {
-                Ok(iter) => dns_summary(iter),
-                Err(_) => json!({ "error": "DNS 解析失败" }),
+    // All probes are independently bounded and run concurrently. Local DNS
+    // failure does not prove a proxy-side DNS failure.
+    let mode_before = proxy_state();
+    let warp_running = if mode_before["mode"] == "warp" {
+        Some(crate::warp::proxy_url().is_some())
+    } else {
+        None
+    };
+    let (dns, http, api_check, backup_check) = tokio::join!(
+        async {
+            match tokio::time::timeout(
+                Duration::from_secs(4),
+                tokio::net::lookup_host((host.as_str(), 443u16)),
+            ).await {
+                Ok(Ok(iter)) => dns_summary(iter),
+                Ok(Err(_)) => json!({"error":"DNS 解析失败"}),
+                Err(_) => json!({"error":"DNS 解析超时"}),
             }
-        })
-        .await
-        .unwrap_or(Value::Null)
-    };
-
-    let started = Instant::now();
-    let http = match get(&format!("{cur}/"), Duration::from_secs(20), None, None).await {
-        Ok(r) => json!({
-            "status": r.status().as_u16(),
-            "ms": started.elapsed().as_millis() as u64,
-        }),
-        Err(e) => json!({
-            "error": e,
-            "ms": started.elapsed().as_millis() as u64,
-        }),
-    };
-
-    // Compare only the two built-in trusted origins; no account credentials or changes to selection.
-    let (api_check, backup_check) = tokio::join!(
+        },
+        async {
+            let started = Instant::now();
+            match get(&format!("{cur}/"), Duration::from_secs(8), None, None).await {
+                Ok(r) => json!({"status":r.status().as_u16(),"ms":started.elapsed().as_millis() as u64}),
+                Err(e) => json!({"error_kind":crate::playback_log::error_kind(&e),"ms":started.elapsed().as_millis() as u64}),
+            }
+        },
         probe_content(&cur),
         async {
             if let Some(origin) = automatic_backup(&cur) {
@@ -715,12 +713,15 @@ pub async fn diagnose() -> Value {
             }
         }
     );
+    let settings_changed = cur != base() || mode_before != proxy_state()
+        || warp_running.is_some_and(|running| running != crate::warp::proxy_url().is_some());
 
     json!({
         "base": cur,
         "host": host,
         "api": api_check,
         "backup": backup_check,
+        "settings_changed": settings_changed,
         "auto_line_recovery": "仅匿名 GET 遇到网络或临时网关故障时尝试两条内置固定线路",
         "secure_dns": {
             "mode": "automatic_fallback_on_local_dns_error",
@@ -728,7 +729,8 @@ pub async fn diagnose() -> Value {
             "note": "仅向加密 DNS 提交域名；DNS 恢复不代表网站或视频服务可访问",
         },
         "proxy": {
-            "mode": proxy_state()["mode"],
+            "mode": mode_before["mode"],
+            "warp_running": warp_running,
             "address": PROXY_SETTINGS.read().ok().and_then(|p| {
                 let selected = effective_proxy(&p);
                 selected.map(|s| redact_proxy(&s))

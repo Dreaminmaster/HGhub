@@ -64,8 +64,10 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 export function describeNetworkDiagnostic(res: Record<string, unknown>): string {
   const http = res.http as { status?: number } | undefined;
   const check = res.api as { ok?: boolean; ms?: number; status?: number; error_kind?: string } | undefined;
-  const proxy = res.proxy as { mode?: string } | undefined;
+  const proxy = res.proxy as { mode?: string; warp_running?: boolean | null } | undefined;
+  if (res.settings_changed === true) return "检测期间网络或线路设置发生变化，请重新检测。";
   const mode = ({ system: "跟随系统", direct: "直连", custom: "手动代理", warp: "内置 WARP" } as Record<string, string>)[proxy?.mode || ""] || "未知";
+  const transport = mode + (proxy?.mode === "warp" && proxy.warp_running === false ? "（本地组件未运行）" : "");
   const homepage = http?.status ? "网页 HTTP " + http.status : "网页未响应";
   const labels: Record<string, string> = {
     timeout: "检测超时", dns_error: "DNS 解析失败", transport_error: "连接失败或服务拒绝",
@@ -77,7 +79,7 @@ export function describeNetworkDiagnostic(res: Record<string, unknown>): string 
   const secondary = backup?.api
     ? "；备用线路：" + (backup.api.ok ? "内容接口正常" : backup.api.status ? "HTTP " + backup.api.status : labels[backup.api.error_kind || ""] || "检测未通过")
     : "";
-  return mode + "；" + homepage + "；" + api + secondary + (check?.status === 503 ? "。服务暂不可用，无法仅凭此判断是出口还是源站故障。" : "。");
+  return transport + "；" + homepage + "；" + api + secondary + (check?.status === 503 ? "。服务暂不可用，无法仅凭此判断是出口还是源站故障。" : "。");
 }
 
 /* ── 接口 ───────────────────────────────────────────────── */

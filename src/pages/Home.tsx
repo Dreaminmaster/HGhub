@@ -15,12 +15,19 @@ export default function Home({ active, bottomInset }: { active: boolean; bottomI
   const [error, setError] = useState("");
   const [diagnostic, setDiagnostic] = useState("");
   const [diagnosing, setDiagnosing] = useState(false);
+  const diagnosticSequence = useRef(0);
   const checkConnection = async () => {
+    const sequence = ++diagnosticSequence.current;
     setDiagnosing(true);
     setDiagnostic("");
-    try { setDiagnostic(describeNetworkDiagnostic(await api.netDiag())); }
-    catch (e) { setDiagnostic((e as Error).message || "连接检测失败"); }
-    finally { setDiagnosing(false); }
+    try {
+      const result = await api.netDiag();
+      if (sequence === diagnosticSequence.current) setDiagnostic(describeNetworkDiagnostic(result));
+    } catch (e) {
+      if (sequence === diagnosticSequence.current) setDiagnostic((e as Error).message || "连接检测失败");
+    } finally {
+      if (sequence === diagnosticSequence.current) setDiagnosing(false);
+    }
   };
   const loadingRef = useRef(false);
 
@@ -29,7 +36,9 @@ export default function Home({ active, bottomInset }: { active: boolean; bottomI
     loadingRef.current = true;
     setLoading(true);
     setError("");
+    ++diagnosticSequence.current;
     setDiagnostic("");
+    setDiagnosing(false);
     try {
       const res = await api.feed(p, 10);
       const list = res?.items || [];
