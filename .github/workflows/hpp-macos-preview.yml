@@ -1,0 +1,59 @@
+name: HPP macOS preview (no release)
+on:
+  workflow_dispatch:
+  push:
+    branches: ["next/hpp-macos-0.0.5"]
+permissions:
+  contents: read
+concurrency:
+  group: hpp-preview-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  preview:
+    if: github.ref == 'refs/heads/next/hpp-macos-0.0.5'
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            src-tauri/crates/hpp -> target
+          key: hpp-preview-macos
+      - run: pnpm install --frozen-lockfile
+      - name: Build frontend
+        run: pnpm build
+      - name: Test plugin host
+        run: cargo test --locked --manifest-path src-tauri/crates/hpp/Cargo.toml
+      - name: Build independent Universal preview
+        run: pnpm tauri build --config src-tauri/tauri.macos.conf.json --target universal-apple-darwin
+      - name: Verify bundle identity and architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/HGhub HPP Preview.app"
+          test -d "$APP"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Contents/Info.plist")" = "com.dreaminmaster.hghub.hpppreview"
+          EXEC=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$APP/Contents/Info.plist")
+          lipo -verify_arch x86_64 arm64 "$APP/Contents/MacOS/$EXEC"
+          codesign --verify "$APP"
+          mkdir -p artifacts
+          find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -exec cp {} artifacts/ \;
+          tar -czf artifacts/HGhub_HPP_Preview.app.tar.gz -C "$(dirname "$APP")" "$(basename "$APP")"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HGhub-HPP-Preview-universal
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
