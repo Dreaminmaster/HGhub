@@ -22,3 +22,6 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test
+      - name: Test inert macOS package replacement and backup recovery
+        if: runner.os == 'macOS'
+        run: bash tests/macos-package-fixture.sh

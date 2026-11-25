@@ -8,3 +8,6 @@ Run cargo test. CI tests on Linux and macOS; successful macOS CI is not an Apple
 
 ## Runner status
 Run 45645481470: Linux 16 tests passed, zero failed or skipped. The macos-latest job was cancelled before any recorded steps; no log is available. The exact cancellation cause is unconfirmed. Switch to macos-15-intel, which previously completed the repository's native tests, and cancel superseded lab runs. This is an Intel macOS test, not an M5 installation test. No packaging or publication.
+
+## macOS package lifecycle fixture
+Run 45691195186 passed 16 tests on each of Linux and Intel macOS. A separate macOS-only test now creates two minimal, locally compiled ExampleMaintenance.app bundles and a DMG inside a temporary directory. It verifies the disk image, mounts it read-only, verifies the copied app, checks that synthetic app data survives replacement, and verifies a known-good backup in a separate recovery directory while retaining the newer state. It never touches /Applications, real user data, system security settings, content services or the original app. The locally compiled fixture is ad-hoc signed; this is not a Gatekeeper, notarization, remote-download or M5 desktop acceptance test. No artifact upload or release. Latest fixture result pending.
