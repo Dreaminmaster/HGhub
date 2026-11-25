@@ -1,0 +1,21 @@
+name: Standalone maintenance lab
+on:
+  push:
+    branches: ["lab/standalone-maintenance-20261126"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  fixtures:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
