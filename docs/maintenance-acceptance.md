@@ -26,3 +26,6 @@ The UI now rejects malformed or unknown update metadata, clears stale successful
 
 ## Native integrity isolation
 The native download path now uses the shared Rust VerifiedStream module. An independent Cargo fixture imports that exact module, not a reimplementation, and tests chunked writes, changed bytes, truncation, oversized chunks, malformed metadata and a writer failure. It never requests a content service, downloads an installer, invokes the OS installer or builds the application. The dedicated CI job checks the shared module; the updated native call site still needs authorized integrated macOS validation. Previous UI run 45622651394 passed. No package publication is enabled.
+
+## Local archive isolation
+Run 45633033533 passed both the native integrity fixture and the browser fixture. The local receipt storage and verification logic is now also split into a runtime-independent core, exercised directly by the independent Cargo fixture. Added receipt round-trip, replacement, capacity, corrupt/duplicate/oversized history, and preservation of evicted files. Existing on-device integration still requires validation. The core never executes or downloads any package; no new distribution path or scheduled job is enabled.
