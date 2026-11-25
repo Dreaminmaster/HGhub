@@ -29,3 +29,6 @@ The native download path now uses the shared Rust VerifiedStream module. An inde
 
 ## Local archive isolation
 Run 45633033533 passed both the native integrity fixture and the browser fixture. The local receipt storage and verification logic is now also split into a runtime-independent core, exercised directly by the independent Cargo fixture. Added receipt round-trip, replacement, capacity, corrupt/duplicate/oversized history, and preservation of evicted files. Existing on-device integration still requires validation. The core never executes or downloads any package; no new distribution path or scheduled job is enabled.
+
+## File lifecycle fixture
+Run 45633671581 passed both isolated Rust and UI jobs for commit d136516. The independent Cargo fixture now composes the shared byte verifier, actual temporary files and receipt storage in three additional tests. It checks successful persistence, cleanup after truncation/corruption/overflow, interrupted reads, and a successful retry without disturbing previously verified files. This is a local inert-data test harness, not the actual native HTTP path or Finder/install authorization. No application packaging, remote service access, release, or scheduled task is added.
