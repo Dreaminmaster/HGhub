@@ -25,3 +25,6 @@ jobs:
       - name: Test inert macOS package replacement and backup recovery
         if: runner.os == 'macOS'
         run: bash tests/macos-package-fixture.sh
+      - name: Test standalone local backup utility
+        if: runner.os == 'macOS'
+        run: python3 -m unittest discover -s tests -p 'test_local_backup.py' -v
