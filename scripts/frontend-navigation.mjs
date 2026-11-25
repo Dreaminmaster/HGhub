@@ -31,7 +31,12 @@ export async function playerPanel(page, panel) {
     await page.getByRole('button', { name: '画质与线路', exact: true }).click();
     await heading.waitFor();
   } else if (panel === '详情') {
-    await page.getByRole('button', { name: /查看详情|作品详情/ }).click();
+    // In full playback the detail action is inside More; preview has its own action.
+    const direct = page.getByRole('button', { name: '作品详情', exact: true });
+    if (!(await direct.isVisible())) {
+      await page.getByRole('button', { name: '更多', exact: true }).click();
+    }
+    await direct.click();
     await page.getByRole('dialog', { name: '作品详情' }).waitFor();
   } else {
     await page.getByRole('button', { name: panel, exact: true }).click();
