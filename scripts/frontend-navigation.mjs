@@ -16,8 +16,13 @@ async function closePlayerPanel(page) {
   if (await close.isVisible()) await close.click();
 }
 async function wakePlayerControls(page) {
-  const video = page.locator('video').first();
-  if (await video.isVisible()) await video.hover();
+  // Move the real pointer over the player surface; error overlays can legitimately
+  // cover the video. Do not force clicks through overlays or dismiss errors.
+  const surface = page.locator('.hg-player-ui.player-root').first();
+  if (await surface.isVisible()) {
+    const bounds = await surface.boundingBox();
+    if (bounds) await page.mouse.move(bounds.x + bounds.width * 0.2, bounds.y + bounds.height * 0.25);
+  }
 }
 export async function playerPanel(page, panel) {
   const title = panel === '播放设置' ? '画质与线路' : panel === '详情' ? '作品详情' : panel;
