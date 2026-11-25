@@ -1,8 +1,8 @@
-name: HPP macOS playback integration
+name: HPP WARP macOS playback integration
 on:
   workflow_dispatch:
   push:
-    branches: ["next/hpp-macos-0.0.5"]
+    branches: ["next/hpp-warp-macos"]
 permissions:
   contents: read
 concurrency:
@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   playback:
-    if: github.ref == 'refs/heads/next/hpp-macos-0.0.5'
+    if: github.ref == 'refs/heads/next/hpp-warp-macos'
     runs-on: macos-15-intel
     timeout-minutes: 45
     steps:

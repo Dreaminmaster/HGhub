@@ -568,6 +568,22 @@ impl Worker {
                     if pump.is_err() || engine.interrupted.load(Ordering::Relaxed) {
                         let owner = engine.owner.borrow().clone();
                         let reason = pump.err().unwrap_or_else(PluginError::timeout);
+                        failures += 1;
+                        // Publish the terminal state before waking callers. Otherwise
+                        // an immediate list/retry after the third error can see "ready".
+                        let terminal = failures >= 3;
+                        if terminal {
+                            let error = PluginError::internal(
+                                "运行时连续故障，已停止；请重试或重新启用插件",
+                            );
+                            logs.lock().unwrap().push(
+                                "error",
+                                &error.message,
+                                "",
+                                error.details.as_ref(),
+                            );
+                            *thread_fault.lock().unwrap() = Some(error);
+                        }
                         for (id, c) in calls.drain() {
                             let e = if id == owner {
                                 if c.cancel.is_cancelled() {
@@ -586,18 +602,7 @@ impl Worker {
                             t.cancel();
                         }
                         generation += 1;
-                        failures += 1;
-                        if failures >= 3 {
-                            let error = PluginError::internal(
-                                "运行时连续故障，已停止；请重试或重新启用插件",
-                            );
-                            logs.lock().unwrap().push(
-                                "error",
-                                &error.message,
-                                "",
-                                error.details.as_ref(),
-                            );
-                            *thread_fault.lock().unwrap() = Some(error);
+                        if terminal {
                             break;
                         }
                         drop(engine);
