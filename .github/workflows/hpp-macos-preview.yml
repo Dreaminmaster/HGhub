@@ -37,7 +37,7 @@ jobs:
       - name: Test plugin host
         run: cargo test --locked --manifest-path src-tauri/crates/hpp/Cargo.toml
       - name: Build independent Universal preview
-        run: pnpm tauri build --config src-tauri/tauri.macos.conf.json --target universal-apple-darwin
+        run: pnpm tauri build --config src-tauri/tauri.macos.conf.json --target universal-apple-darwin --bundles app
       - name: Verify bundle identity and architecture
         shell: bash
         run: |
@@ -46,11 +46,18 @@ jobs:
           test -d "$APP"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Contents/Info.plist")" = "com.dreaminmaster.hghub.hpppreview"
           EXEC=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$APP/Contents/Info.plist")
-          lipo -verify_arch x86_64 arm64 "$APP/Contents/MacOS/$EXEC"
+          lipo "$APP/Contents/MacOS/$EXEC" -verify_arch x86_64 arm64
           codesign --verify "$APP"
           mkdir -p artifacts
-          find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -exec cp {} artifacts/ \;
           tar -czf artifacts/HGhub_HPP_Preview.app.tar.gz -C "$(dirname "$APP")" "$(basename "$APP")"
+          STAGE="$(mktemp -d "$RUNNER_TEMP/hghub-hpp-dmg.XXXXXX")"
+          trap 'rm -rf "$STAGE"' EXIT
+          ditto "$APP" "$STAGE/$(basename "$APP")"
+          ln -s /Applications "$STAGE/Applications"
+          DMG="$PWD/artifacts/HGhub_HPP_Preview_universal.dmg"
+          hdiutil create -ov -srcfolder "$STAGE" -volname "HGhub HPP Preview" -format UDZO "$DMG"
+          hdiutil verify "$DMG"
+          test -s "$DMG"
       - uses: actions/upload-artifact@v4
         with:
           name: HGhub-HPP-Preview-universal
