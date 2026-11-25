@@ -59,3 +59,46 @@ async fn interrupted_runtime_skips_dispose() {
         .any(|entry| entry["text"] == "must not run"));
     drop(dir);
 }
+
+#[tokio::test]
+async fn consecutive_runtime_fault_is_visible_before_third_error_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = Meta::parse(json!({
+        "id": "fixture.terminal-fault", "name": "Terminal fault",
+        "version": "1.0.0", "protocol": 1
+    })).unwrap();
+    let store = Arc::new(Store::open(dir.path().join("store.json")).unwrap());
+    let network = Arc::new(Network::new(
+        meta.clone(), dir.path().into(), Some(false), Default::default(),
+    ).unwrap());
+    let source = format!(
+        "export const meta={};export default hg=>({{media:{{getDetail(){{while(true){{}}}},resolvePlayback(){{return {{ok:true}};}}}}}});",
+        serde_json::to_string(&meta).unwrap()
+    );
+    let worker = Worker::spawn(
+        source, meta, json!({}), Value::Null, store, network,
+        Default::default(), Default::default(), None,
+    ).await.unwrap();
+    let invoke = |id: String, method: &str| {
+        worker.call(id, method.to_owned(), Transfer::from_json(json!({})), Duration::from_secs(10))
+    };
+    // Two interruptions are recoverable, and a healthy call resets the streak.
+    for n in 0..2 {
+        assert!(tokio::time::timeout(Duration::from_secs(15),
+            invoke(format!("before-{n}"), "media.getDetail")).await.unwrap().is_err());
+        assert!(worker.fault().is_none());
+    }
+    assert!(tokio::time::timeout(Duration::from_secs(15),
+        invoke("healthy".to_owned(), "media.resolvePlayback")).await.unwrap().is_ok());
+    for n in 0..3 {
+        assert!(tokio::time::timeout(Duration::from_secs(15),
+            invoke(format!("after-{n}"), "media.getDetail")).await.unwrap().is_err());
+        if n < 2 {
+            assert!(worker.fault().is_none(), "healthy call must reset the failure streak");
+        } else {
+            // No polling or delay: callers must see the terminal state immediately.
+            assert!(worker.fault().is_some(), "terminal state must precede the third reply");
+        }
+    }
+    worker.stop_and_wait().await.unwrap();
+}
