@@ -131,7 +131,7 @@ impl Journal {
         let dir = self.dir.as_ref().ok_or("日志目录尚未初始化")?;
         let path = dir.join("playback.log");
         let ts = crate::logging::utc_timestamp()?;
-        let line = json!({ "ts": ts, "pid": std::process::id(), "seq": SEQ.fetch_add(1, Ordering::Relaxed), "event": event, "strict": crate::network_policy::strict_security(), "data": scrub(&data, 0) }).to_string() + "\n";
+        let line = json!({ "ts": ts, "pid": std::process::id(), "version": env!("CARGO_PKG_VERSION"), "seq": SEQ.fetch_add(1, Ordering::Relaxed), "event": event, "strict": crate::network_policy::strict_security(), "data": scrub(&data, 0) }).to_string() + "\n";
         if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) + line.len() as u64 > limit {
             let previous = dir.join("playback.previous.log");
             if previous.exists() {
@@ -245,7 +245,7 @@ pub fn playback_log_write(entries: Vec<Entry>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn playback_log_read() -> Result<String, String> {
+pub fn playback_log_read(current_only: Option<bool>) -> Result<String, String> {
     let log = LOG.lock().map_err(|_| "日志锁失败")?;
     let dir = log.dir.as_ref().ok_or("日志目录尚未初始化")?;
     let mut text = String::new();
@@ -258,12 +258,45 @@ pub fn playback_log_read() -> Result<String, String> {
             text.push_str(&fs::read_to_string(path).map_err(|_| "无法读取日志")?);
         }
     }
-    Ok(text)
+    if current_only.unwrap_or(false) {
+        Ok(current_process_log(&text, std::process::id(), env!("CARGO_PKG_VERSION")))
+    } else {
+        Ok(text)
+    }
+}
+
+// Old entries lack a top-level version and must not be mistaken for this run.
+fn current_process_log(text: &str, pid: u32, version: &str) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            if value["pid"].as_u64() == Some(u64::from(pid))
+                && value["version"].as_str() == Some(version) {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_process_export_excludes_old_versions_and_other_processes() {
+        let text = [
+            json!({"pid":10,"data":{"version":"1.2.0"}}),
+            json!({"pid":10,"version":"1.2.0"}),
+            json!({"pid":11,"version":"1.2.8"}),
+            json!({"pid":10,"version":"1.2.8","event":"current"}),
+        ].iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+        let result = current_process_log(&text, 10, "1.2.8");
+        assert_eq!(result.lines().count(), 1);
+        assert!(result.contains("current"));
+        assert!(current_process_log(&text, 99, "1.2.8").is_empty());
+    }
 
     #[test]
     fn commands_stop_writes_when_disabled_and_read_retained_logs() {
@@ -292,7 +325,7 @@ mod tests {
         .unwrap();
         record("test.off", json!({"n": 2}));
         assert_eq!(fs::metadata(dir.join("playback.log")).unwrap().len(), size);
-        let text = playback_log_read().unwrap();
+        let text = playback_log_read(Some(true)).unwrap();
         assert!(text.contains("web.seek.request"));
         assert!(!text.contains("test.off"));
         bind(&dir);

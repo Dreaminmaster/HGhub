@@ -92,12 +92,13 @@ async fn probe_one(url: String) -> Value {
     };
     let target = format!("{origin}/");
     let started = Instant::now();
-    // Only fixed origins receive content API requests during line-list diagnostics.
-    // Third-party mirror rows remain explicitly website-only, not API-verified.
+    // Only fixed origins and the explicitly selected source get a content API
+    // probe. Other rows remain website-only. Never send credentials.
     let (res, api) = tokio::join!(
         crate::net::get(&target, PROBE_TIMEOUT, Some("text/html,application/xhtml+xml"), None),
         async {
-            if FIXED.iter().any(|(_, fixed)| *fixed == origin.as_str()) {
+            if origin == crate::net::base()
+                || FIXED.iter().any(|(_, fixed)| *fixed == origin.as_str()) {
                 crate::net::probe_content(&origin).await
             } else {
                 Value::Null
