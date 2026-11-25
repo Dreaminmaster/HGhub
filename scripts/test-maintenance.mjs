@@ -61,6 +61,25 @@ try {
   await page.getByText("更新偏好已恢复。",{exact:true}).waitFor();
   assert.equal(await page.locator("select").inputValue(),"beta");
   assert.equal((await page.evaluate(()=>window.maintenanceFixture.counts())).checks,2,"restore must not trigger a network check");
+  // Read-only status and malformed metadata must not expose a download action.
+  for (const [method, message] of [
+    ["noRelease","没有找到此渠道中带有效文件摘要的 macOS 安装包。"],
+    ["current","当前版本不低于此渠道可下载版本。"],
+    ["invalidDigest","更新文件信息不完整或无效"],
+    ["unknownStatus","更新状态无法识别"]
+  ]) {
+    await page.evaluate(()=>window.maintenanceFixture.newCheck());
+    await page.getByRole("button",{name:"检查更新",exact:true}).click();
+    await page.evaluate(m=>window.maintenanceFixture[m](),method);
+    await page.getByText(message,{exact:true}).waitFor();
+    assert.equal(await page.getByRole("button",{name:"下载安装包",exact:true}).count(),0);
+    await page.evaluate(()=>window.maintenanceFixture.downloadAgain());
+    assert.equal((await page.evaluate(()=>window.maintenanceFixture.counts())).downloads,2);
+  }
+  await page.reload();
+  await page.getByRole("button",{name:"检查更新",exact:true}).waitFor();
+  assert.equal(await page.locator("select").inputValue(),"beta","restored channel survives reload");
+  assert.equal((await page.evaluate(()=>window.maintenanceFixture.counts())).downloads,0);
   assert.deepEqual(errors,[]);
   assert.deepEqual(external,[]);
   console.log("PASS: update check, deduplication, explicit download, progress, local archive, failure and no external requests");

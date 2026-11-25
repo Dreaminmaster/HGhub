@@ -31,16 +31,26 @@ export function checkMaintenance() {
   if (pending) return pending;
   if (snapshot.downloading) return Promise.resolve();
   const channel = prefs.channel;
-  set({ busy: true, error: "", result: null });
+  set({ busy: true, error: "", result: null, checked: "", downloadError: "" });
   pending = api.manualUpdateCheck(channel).then(result => {
-    if (prefs.channel === channel) set({ result, checked: new Date().toISOString() });
+    if (prefs.channel !== channel) return;
+    if (!["available","current","no_release","unsupported"].includes(result.status)) {
+      throw new Error("更新状态无法识别");
+    }
+    if (result.status === "available" &&
+        (!result.version || !/^\d+\.\d+\.\d+$/.test(result.version) ||
+         !result.digest || !/^[a-f0-9]{64}$/i.test(result.digest) ||
+         !Number.isSafeInteger(result.size) || result.size! <= 0 || result.size! > 256*1024*1024)) {
+      throw new Error("更新文件信息不完整或无效");
+    }
+    set({ result, checked: new Date().toISOString() });
   }).catch(e => { if (prefs.channel === channel) set({error: (e as Error).message || "检查失败"}); })
     .finally(() => { pending = null; set({busy:false}); });
   return pending;
 }
 export async function downloadMaintenance() {
-  const {result, downloading}=snapshot;
-  if (!result?.version || !result.digest || downloading || result.status!=="available") return;
+  const {result, downloading, busy}=snapshot;
+  if (!result?.version || !result.digest || downloading || busy || result.status!=="available") return;
   set({downloading:true,downloaded:null,downloadError:""});
   try { set({downloaded:await api.manualUpdateDownload(prefs.channel,result.version,result.digest)}); }
   catch(e) { set({downloadError:(e as Error).message || "下载失败"}); }

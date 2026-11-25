@@ -20,3 +20,6 @@ Use the operating system's normal backup facility (e.g. Time Machine) or keep a 
 - [ ] Only publish an explicitly authorized package after these checks. Keep existing releases unchanged until then.
 
 No scheduled jobs, automatic code imports, new publication, security-policy exceptions, or automatic replacement are authorized by this record.
+
+## Boundary regression follow-up
+The UI now rejects malformed or unknown update metadata, clears stale successful check times on new checks, and prevents a download during a check. The fixture covers no eligible release, current version, invalid digest, unknown status and persisted preference reload. These changes are limited to the local UI acceptance branch. Native HTTP timeouts, native byte-stream integrity, actual macOS installation and release authorization remain separate gates. Latest passing evidence before this follow-up: run 45621484879.
