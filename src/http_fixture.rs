@@ -1,12 +1,22 @@
 //! Loopback HTTP integration tests only. No external downloads or executable packages.
 use super::update_integrity::VerifiedStream;
 use sha2::{Digest,Sha256};
-use std::{io::{Read,Write},net::{TcpListener,Shutdown},thread,time::Duration};
+use std::{io::{Read,Write},net::{TcpListener,Shutdown},thread,time::{Duration,Instant}};
 fn server(response:Vec<u8>,delay:Duration)->(String,thread::JoinHandle<()>) {
     let listener=TcpListener::bind("127.0.0.1:0").unwrap();
     let addr=listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
     let task=thread::spawn(move||{
-        let (mut stream,_)=listener.accept().unwrap();
+        let deadline=Instant::now()+Duration::from_secs(4);
+        let mut stream=loop {
+            match listener.accept() {
+                Ok((stream,_))=>break stream,
+                Err(e) if e.kind()==std::io::ErrorKind::WouldBlock && Instant::now()<deadline=>thread::sleep(Duration::from_millis(5)),
+                _=>return,
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let mut request=Vec::new();
         let mut byte=[0;1];
