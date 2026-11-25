@@ -17,3 +17,6 @@ Completed verified downloads receive a bounded receipt in application data. Hist
 - Update channel changes and repeated update checks are refused while an operation would become inconsistent.
 - Dedicated browser fixture mounts the real update and archive UI, stubs only native commands, blocks external requests, and checks read-only detection, deduplication, user-initiated download, busy state, failure display, and archived installer visibility. Native download, Finder and OS authorization remain separate on-device acceptance steps.
 - This follow-up branch intentionally leaves the running archive CI on PR #12 untouched. Merge into that branch only after its build has passed. No release or scheduled job is enabled.
+
+## Isolated UI acceptance
+The normal macOS workflow targets pull requests into main, which explains why PR #13 (targeting a development branch) has no run. A separate Ubuntu UI-only workflow checks the maintenance fixture on pushes to the acceptance branch. It uses mocked native calls, blocks external browser requests, does not run native packaging, import service adapters or publish artifacts. Download failure and retry are now covered explicitly.

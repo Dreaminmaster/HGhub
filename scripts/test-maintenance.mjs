@@ -34,6 +34,13 @@ try {
   await page.getByRole("button",{name:"重新校验并定位文件",exact:true}).click();
   await page.getByText(/已重新验证文件并在 Finder 中定位/).waitFor();
   assert.equal((await page.evaluate(()=>window.maintenanceFixture.counts())).reveals,1);
+  await page.evaluate(()=>window.maintenanceFixture.newDownload());
+  await page.getByRole("button",{name:"下载安装包",exact:true}).click();
+  await page.getByRole("button",{name:"下载并校验中…",exact:true}).waitFor();
+  await page.evaluate(()=>window.maintenanceFixture.failDownload());
+  await page.getByText("fixture download failed",{exact:true}).waitFor();
+  assert.equal(await page.getByRole("button",{name:"下载安装包",exact:true}).isEnabled(),true);
+  assert.equal(await page.getByText(/文件完整性校验通过/).count(),0,"failed download must not retain success");
   await page.evaluate(()=>window.maintenanceFixture.newCheck());
   await page.getByRole("button",{name:"检查更新",exact:true}).click();
   await page.evaluate(()=>window.maintenanceFixture.failCheck());

@@ -24,5 +24,7 @@ const fixture={
   switchChannel:()=>setMaintenancePreferences({channel:"beta"}),
   downloadAgain:()=>{void downloadMaintenance();},
   finishDownload:()=>file.resolve(download),
+  newDownload:()=>{file=deferred<DownloadedUpdate>();},
+  failDownload:()=>file.reject(new Error("fixture download failed")),
 };
 Object.assign(window,{maintenanceFixture:fixture});
