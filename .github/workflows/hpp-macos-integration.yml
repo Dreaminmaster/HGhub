@@ -1,0 +1,53 @@
+name: HPP macOS playback integration
+on:
+  workflow_dispatch:
+  push:
+    branches: ["next/hpp-macos-0.0.5"]
+permissions:
+  contents: read
+concurrency:
+  group: hpp-integration-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  playback:
+    if: github.ref == 'refs/heads/next/hpp-macos-0.0.5'
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri/crates/hpp -> target
+          key: hpp-macos-browser-integration
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Locate browser with MP4 support
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+          if [[ -x "$CHROME" ]]; then
+            "$CHROME" --version
+            echo "BROWSER_EXECUTABLE=$CHROME" >> "$GITHUB_ENV"
+          else
+            pnpm exec playwright-core install chromium
+          fi
+      - name: Compile real plugin host
+        run: cargo build --locked --manifest-path src-tauri/crates/hpp/Cargo.toml --example dev_host
+      - name: Exercise import, search, playback and source isolation
+        run: node scripts/test-plugins.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: HPP-macOS-playback-report
+          path: test-results/plugins/
+          if-no-files-found: warn
+          retention-days: 14

@@ -2,6 +2,8 @@
 
 This independent noncommercial preview is based on upstream Minireel/HGhub v0.0.5 (b223ff6187369408803b2be7878ce456fceb0a7b). It is not the legacy v1.2.x client and does not promise restoration of a third-party server that returns HTTP 503. Install it alongside the legacy client; it uses an independent application identifier and data directory. No legacy credentials, favorites, plugins or WARP registrations are copied. The upstream system/direct/custom proxy controls are retained; embedded WARP is intentionally not ported until the new host is validated. No content sources are bundled. The official synthetic example at `examples/plugin-hello.js` may be imported to test the host with your own authorized HTTPS MP4; its settings require a URL supplied by the user. The source and licensing notices below are unchanged.
 
+Validation is split into packaging and browser integration workflows. The latter runs the original upstream integration suite on macOS, against a real Rust/QuickJS host and React UI, with synthetic local media and a mocked native IPC bridge. The fixture runs in isolated relaxed mode to permit loopback HTTP; this is not a change to production security defaults. Passing this suite does not establish that the signed WKWebView application or any external source works on a user's Mac.
+
 <p align="center">
   <img src="app-icon.svg" width="88" height="88" alt="HGhub 图标" />
 </p>

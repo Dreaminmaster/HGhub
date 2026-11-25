@@ -1,5 +1,5 @@
 import { openRecommendations, installedTab, importTab, playerPanel, chooseEpisode } from "./frontend-navigation.mjs";
-// Windows integration: real Rust/QuickJS + real React + Edge media decoding.
+// Integration: real Rust/QuickJS + real React + Chromium-family media decoding.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -23,7 +23,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const output = join(root, "test-results", "plugins", new Date().toISOString().replace(/[:.]/g, "-"));
 await mkdir(output, { recursive: true });
 const data = await mkdtemp(join(tmpdir(), "hghub-hpp-"));
-const report = { platform: process.platform, transport: "Windows Rust QuickJS host; Edge browser; stdio replaces Tauri IPC only", passed: [], external: [] };
+const report = { platform: process.platform, transport: "Real Rust QuickJS host; Chromium-family browser; stdio replaces Tauri IPC only; local fixtures", passed: [], external: [] };
 let host, browser, page, vite, server;
 try {
   const pending = new Map(); let serial = 0;
