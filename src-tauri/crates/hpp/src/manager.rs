@@ -310,13 +310,16 @@ impl PluginManager {
                 }
             }
         }
+        self.requirements(&p.entry.meta)?;
+        // Do not create a replacement until the previous runtime has exited.
+        // Retain the handle on timeout so a later retry cannot overlap it.
+        if let Some(w) = &p.worker {
+            w.stop_and_wait().await?;
+        }
+        p.worker = None;
         if full {
             self.sessions.release_plugin(&p.entry.meta.id);
             p.revision = uuid::Uuid::new_v4().to_string();
-        }
-        self.requirements(&p.entry.meta)?;
-        if let Some(w) = p.worker.take() {
-            w.stop();
         }
         let source = std::fs::read_to_string(self.root.join(&p.entry.meta.id).join("plugin.js"))?;
         let spawn = |endpoint: Value| {
