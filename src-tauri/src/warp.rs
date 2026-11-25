@@ -123,7 +123,11 @@ mod native {
         Ok(())
     }
 
-    async fn verify_tunnel(url: &str) -> Result<(), String> {
+    fn verified_trace(body: &str) -> bool {
+        body.lines().any(|line| matches!(line.trim(), "warp=on" | "warp=plus"))
+    }
+
+    pub async fn verify_tunnel(url: &str) -> Result<(), String> {
         // Require independent evidence of WARP egress before activating it.
         // Otherwise an HTTP listener alone would be mistakenly reported as connected.
         let proxy = reqwest::Proxy::all(url).map_err(|_| "WARP 本地地址错误")?;
@@ -138,7 +142,7 @@ mod native {
             return Err("WARP 出口检测未通过".into());
         }
         let body = resp.text().await.map_err(|_| "WARP 检测结果无效")?;
-        if !body.lines().any(|line| matches!(line.trim(), "warp=on" | "warp=plus")) {
+        if !verified_trace(&body) {
             return Err("未验证到 WARP 出口，拒绝切换流量".into());
         }
         Ok(())
@@ -206,9 +210,13 @@ mod native {
             }
             register(&binary, &config).await?;
         }
-        if proxy_url().is_some() {
-            crate::net::proxy_set("warp", "")?;
-            return Ok(status(&app));
+        if let Some(url) = proxy_url() {
+            if verify_tunnel(&url).await.is_ok() && proxy_url().as_deref() == Some(url.as_str()) {
+                crate::net::proxy_set("warp", "")?;
+                return Ok(status(&app));
+            }
+            // A live listener alone is not proof of a working tunnel.
+            shutdown();
         }
 
         // First try MASQUE over QUIC/UDP; if the Wi-Fi blocks UDP, retry HTTP/2 TCP.
@@ -248,6 +256,14 @@ mod native {
     mod tests {
         use super::*;
         #[test]
+        fn trace_requires_explicit_verified_warp_egress() {
+            assert!(verified_trace("ip=192.0.2.1\nwarp=on\n"));
+            assert!(verified_trace("warp=plus\r\n"));
+            assert!(!verified_trace("warp=off\n"));
+            assert!(!verified_trace("note=warp=on\n"));
+            assert!(!verified_trace("<html>warp=on</html>"));
+        }
+        #[test]
         fn registration_validation_does_not_return_credentials() {
             let tmp = std::env::temp_dir().join(format!("hghub-warp-check-{}", std::process::id()));
             let _ = fs::remove_file(&tmp);
@@ -266,6 +282,26 @@ pub fn proxy_url() -> Option<String> {
     { return native::proxy_url(); }
     #[cfg(not(target_os = "macos"))]
     { None }
+}
+
+pub async fn diagnose_egress() -> Value {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(url) = proxy_url() else {
+            return json!({"ok":false,"reason":"component_not_running"});
+        };
+        let result = native::verify_tunnel(&url).await;
+        if proxy_url().as_deref() != Some(url.as_str()) {
+            return json!({"ok":false,"reason":"connection_changed"});
+        }
+        return if result.is_ok() {
+            json!({"ok":true})
+        } else {
+            json!({"ok":false,"reason":"egress_not_verified"})
+        };
+    }
+    #[cfg(not(target_os = "macos"))]
+    { json!({"ok":false,"reason":"unsupported_platform"}) }
 }
 
 pub fn shutdown() {
