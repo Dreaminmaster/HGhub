@@ -100,6 +100,14 @@ jobs:
           shasum -a 256 src-tauri/resources/usque
           # The final application bundles resources/usque (not the temporary arch files).
 
+      # Tauri's generate_context! embeds frontendDist during cargo test.
+      # Build the actual frontend first rather than creating a dummy dist directory.
+      - name: 构建前端供原生回归测试使用
+        if: github.ref != 'refs/heads/main' && matrix.arch == 'x64'
+        run: |
+          pnpm build
+          test -f dist/index.html
+
       - name: Rust 回归测试（PR）
         if: github.ref != 'refs/heads/main' && matrix.arch == 'x64'
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
