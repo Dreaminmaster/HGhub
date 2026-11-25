@@ -147,10 +147,14 @@ export const api = {
 
   /* 更新检查：对比 GitHub Release 的 tag */
   checkUpdate: () => call<UpdateInfo>("check_update"),
+  signedUpdateCheck: (channel: "stable" | "beta") => call<SignedUpdateInfo>("signed_update_check", { channel }),
+  signedUpdateInstall: (channel: "stable" | "beta", version: string) => call<void>("signed_update_install", { channel, version }),
   openUrl: (url: string) => call<void>("open_url", { url }),
 };
 
 /* ── 更新检查 ───────────────────────────────────────────── */
+
+export type SignedUpdateInfo = { configured: boolean; version?: string; notes?: string; status: string };
 
 export type UpdateInfo = {
   current: string;

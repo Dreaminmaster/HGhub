@@ -1,9 +1,10 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { api, describeNetworkDiagnostic, APP_VERSION, hostOf, logLine, platform, type UpdateInfo, type ProxyState, type WarpStatus } from "../api";
+import { api, describeNetworkDiagnostic, APP_VERSION, hostOf, logLine, platform, type ProxyState, type WarpStatus } from "../api";
 import { useStore } from "../store";
 import { Modal, Toggle } from "../components/ui";
 import LinePicker from "../components/LinePicker";
 import { copyPlaybackLog, initPlaybackLog, setPlaybackLog, usePlaybackLog } from "../playbackDiagnostics";
+import UpdateCenter from "../components/UpdateCenter";
 import { IBack, IBoltF, IBroom, IChevR, IHeart, IInfo, ILink, ILockF, IMoon, IRefresh, ISettings, ISun, IVolMute } from "../icons";
 
 /* 独立设置页：线路 / 外观 / 播放 / 本地数据 / 清理缓存 / 网络诊断 / 关于
@@ -25,8 +26,7 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
   const [warpMessage, setWarpMessage] = useState("");
   const [warpTermsOpen, setWarpTermsOpen] = useState(false);
   const [warpAgreed, setWarpAgreed] = useState(false);
-  const [checking, setChecking] = useState(false);
-  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+
   const playbackLog = usePlaybackLog();
   const [copyingLog, setCopyingLog] = useState(false);
 
@@ -116,19 +116,6 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
     }
   };
   useEffect(() => { void initPlaybackLog(); }, []);
-
-  const checkUpdate = async () => {
-    setChecking(true);
-    try {
-      const info = await api.checkUpdate();
-      if (info.has_update) setUpdate(info);
-      else toast(`已是最新版本 v${info.current}`, "ok");
-    } catch (e) {
-      toast((e as Error).message || "检查更新失败", "info");
-    } finally {
-      setChecking(false);
-    }
-  };
 
   const Section = ({ title, children }: { title: string; children: ReactNode }) => (
     <>
@@ -401,14 +388,7 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
           </Section>
 
           <Section title="其他">
-            <button onClick={checkUpdate} disabled={checking} className="w-full flex items-center gap-3 px-3.5 py-3 text-left pressable disabled:opacity-60">
-              <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IRefresh size={16} /></span>
-              <div className="flex-1">
-                <div className="text-[12.5px] text-on">检查更新</div>
-                <div className="text-[10.5px] text-mut">{checking ? "检查中…" : `当前 v${APP_VERSION} · 对比 GitHub Release`}</div>
-              </div>
-              <IChevR size={15} className="text-mut" />
-            </button>
+            <UpdateCenter />
             <button onClick={() => setAbout(true)} className="w-full flex items-center gap-3 px-3.5 py-3 text-left pressable">
               <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IInfo size={16} /></span>
               <div className="flex-1">
@@ -522,28 +502,6 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
         </div>
       </Modal>
 
-      <Modal open={!!update?.has_update} onClose={() => setUpdate(null)} width={392}>
-        <div className="p-5">
-          <div className="text-[15px] font-bold text-on">发现新版本</div>
-          <p className="text-[11.5px] text-mut mt-1.5">
-            v{update?.current} → <b className="text-on">v{update?.latest}</b>
-            {update?.published_at ? ` · ${update.published_at.slice(0, 10)}` : ""}
-          </p>
-          {!!update?.notes && (
-            <div className="mt-3 max-h-[180px] scroll-y rounded-(--r-sm) bg-s2 p-3 text-[11px] text-mut whitespace-pre-wrap leading-relaxed">{update.notes}</div>
-          )}
-          <div className="flex gap-2 mt-4">
-            <button onClick={() => setUpdate(null)} className="flex-1 h-9 rounded-(--r-ctl) bg-s3 text-[12.5px] text-on/80 pressable">稍后</button>
-            <button onClick={() => {
-              if (!update) return;
-              api.openUrl(update.url).catch(() => {
-                navigator.clipboard?.writeText(update.url).then(() => toast("下载地址已复制", "ok")).catch(() => {});
-              });
-            }} className="flex-1 h-9 rounded-(--r-ctl) bg-primary text-[12.5px] font-semibold text-on-primary pressable">前往下载</button>
-          </div>
-          <div className="text-[10px] text-dim mt-2.5 break-all">{update?.url}</div>
-        </div>
-      </Modal>
     </div>
   );
 }

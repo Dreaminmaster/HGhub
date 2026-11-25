@@ -133,50 +133,40 @@ fn is_newer(latest: &str, current: &str) -> bool {
 #[tauri::command]
 pub async fn check_update() -> Result<Value, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
-    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let resp = crate::net::get(
-        &url,
-        std::time::Duration::from_secs(12),
-        Some("application/vnd.github+json"),
-        None,
-    )
-    .await?;
-
-    let status = resp.status();
-    if status.as_u16() == 404 {
-        // 还没发过 release
-        return Ok(json!({
-            "current": current, "latest": "", "has_update": false,
-            "url": format!("https://github.com/{REPO}/releases"),
-        }));
+    let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=50");
+    let resp = crate::net::get(&url, std::time::Duration::from_secs(12),
+        Some("application/vnd.github+json"), None).await?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub 返回 HTTP {}", resp.status()));
     }
-    if !status.is_success() {
-        return Err(format!("GitHub 返回 HTTP {status}"));
+    let releases: Vec<Value> = resp.json().await.map_err(|_| "版本列表格式无效")?;
+    let selected = releases.iter().filter(|r| release_for_platform(r))
+        .max_by_key(|r| ver_parts(r["tag_name"].as_str().unwrap_or("")));
+    let Some(r) = selected else {
+        return Ok(json!({"current":current,"latest":"","has_update":false,
+            "url":format!("https://github.com/{REPO}/releases"),"status":"no_release"}));
+    };
+    let tag = r["tag_name"].as_str().unwrap_or("");
+    Ok(json!({"current":current,"latest":tag.trim_start_matches('v'),
+        "tag":tag,"has_update":is_newer(tag,&current),
+        "url":format!("https://github.com/{REPO}/releases/tag/{tag}"),
+        "published_at":r["published_at"].as_str().unwrap_or(""),
+        "notes":r["body"].as_str().unwrap_or("").chars().take(800).collect::<String>(),
+        "status":"metadata_only"}))
+}
+
+fn release_for_platform(r: &Value) -> bool {
+    if r["draft"] != false || r["prerelease"] != false { return false; }
+    let tag = r["tag_name"].as_str().unwrap_or("");
+    let suffix = if cfg!(target_os="macos") { "-macos" } else if cfg!(target_os="ios") { "-ios" } else { "" };
+    let Some(version) = tag.strip_prefix('v').and_then(|x| x.strip_suffix(suffix)) else { return false; };
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len()!=3 || !parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u64>().is_ok()) { return false; }
+    let name = format!("HGhub_{}_universal.dmg",version);
+    if cfg!(target_os="macos") {
+        return r["assets"].as_array().is_some_and(|assets| assets.iter().any(|a| a["name"].as_str()==Some(name.as_str())));
     }
-
-    let v: Value = resp.json().await.map_err(|e| crate::net::err_text(&e))?;
-    let tag = v
-        .get("tag_name")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
-    let html = v
-        .get("html_url")
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("https://github.com/{REPO}/releases"));
-    let notes = v.get("body").and_then(|x| x.as_str()).unwrap_or("");
-
-    Ok(json!({
-        "current": current,
-        "latest": tag.trim_start_matches(['v', 'V']).to_string(),
-        "tag": tag,
-        "has_update": !tag.is_empty() && is_newer(&tag, &current),
-        "url": html,
-        "name": v.get("name").and_then(|x| x.as_str()).unwrap_or(""),
-        "published_at": v.get("published_at").and_then(|x| x.as_str()).unwrap_or(""),
-        "notes": notes.chars().take(800).collect::<String>(),
-    }))
+    true
 }
 
 /// 用系统默认浏览器打开链接（只允许 http/https）。
