@@ -224,15 +224,22 @@ try {
   await page.waitForFunction(() => document.querySelector("video")?.currentTime > 0.5);
   await page.evaluate(() => { const video = document.querySelector("video"); video.currentTime = 2; video.pause(); });
   await page.waitForFunction(() => document.querySelector("video")?.paused);
+  // Full playback intentionally hides the desktop rail. Leave using the real back control.
+  await page.locator(".hg-player-ui.mode-full").getByRole("button", { name: "返回", exact: true }).click();
+  await rail.waitFor({ state: "visible" });
   await rail.getByRole("button", { name: "我的", exact: true }).click();
-  await page.getByRole("heading", { name: "重命名虚构影院", exact: true }).waitFor();
-  await page.getByRole("button", { name: "历史", exact: true }).click();
-  await page.getByRole("button", { name: "继续观看", exact: true }).click();
+  await page.getByRole("heading", { name: "我的片库", exact: true }).waitFor();
+  await page.getByRole("navigation", { name: "片库分栏" }).getByRole("button", { name: /^历史(?: \(\d+\))?$/ }).click();
+  const historyEntry = page.locator(".hpp-local-library").getByRole("article").filter({ has: page.getByRole("heading", { name: "重命名虚构影院", exact: true }) });
+  await historyEntry.getByRole("button", { name: "继续观看", exact: true }).click();
   await chooseEpisode(page, '普通视频');
   await page.waitForFunction(() => document.querySelector("video")?.currentTime >= 2);
   const libraryData = JSON.parse(await readFile(join(data, "library.json"), "utf8"));
   assert(Object.values(libraryData.progress).some(p => p.pluginId === "fixture.local" && p.playlistId === "main" && p.episodeId === "progressive" && p.positionSec >= 2));
   assert(Object.values(libraryData.entries).some(e => e.favorite && e.tracking));
+  await page.locator(".hg-player-ui.mode-full").getByRole("button", { name: "返回", exact: true }).click();
+  await rail.waitFor({ state: "visible" });
+  report.passed.push("Playback back navigation restores main rail and history opens the same saved episode");
   await rail.getByRole("button", { name: "分类", exact: true }).click();
   await page.getByRole("button", { name: /分类中的虚构短剧/ }).waitFor();
   await page.locator('.legacy-category-heading').first().click();
@@ -394,7 +401,7 @@ try {
   await account.getByRole("button",{name:/云端虚构收藏/}).waitFor();
   await account.getByRole("button",{name:"本页导入到本地片库",exact:true}).click();
   await account.getByRole("status").filter({hasText:"本页条目已导入本地收藏"}).waitFor();
-  await page.getByRole("button", { name: "收藏", exact: true }).click();
+  await page.getByRole("navigation", { name: "片库分栏" }).getByRole("button", { name: /^收藏(?: \(\d+\))?$/ }).click();
   await page.locator(".hpp-local-library").getByRole("heading",{name:"云端虚构收藏",exact:true}).waitFor();
   assert((await dispatch({action:"library.put",params:{pluginId:"fixture.forms",item:{id:"cloud-one",title:"云端虚构收藏"},tracking:true}})).ok);
   await page.reload();
