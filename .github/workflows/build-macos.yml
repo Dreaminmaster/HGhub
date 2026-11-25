@@ -35,6 +35,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Compile-time integration only: upstream source remains in its original repo.
+      - name: Prepare pinned noncommercial compatibility candidate
+        if: github.ref != 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q "$RUNNER_TEMP/hghubx-compat"
+          git -C "$RUNNER_TEMP/hghubx-compat" fetch --depth=1 https://github.com/zxsos/HGhubX.git 6370c4412f8c7179018e1dcbb84ffb084c70b796
+          git -C "$RUNNER_TEMP/hghubx-compat" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/hghubx-compat" rev-parse HEAD)" = "6370c4412f8c7179018e1dcbb84ffb084c70b796"
+          python3 scripts/prepare-compat-candidate.py "$RUNNER_TEMP/hghubx-compat"
+          rm -rf "$RUNNER_TEMP/hghubx-compat"
+
       - name: 对齐版本号
         id: ver
         shell: bash
@@ -167,13 +180,14 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: HGhub-macOS-${{ matrix.arch }}
+          name: HGhub-compat-macOS-${{ matrix.arch }}
+          retention-days: 1
           path: artifacts/*
           if-no-files-found: error
 
   publish-release:
     name: 发布 GitHub Release
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: false # Compatibility candidate must never publish a Release
     needs: [macos]
     runs-on: ubuntu-latest
     permissions:
