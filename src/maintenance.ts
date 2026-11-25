@@ -16,6 +16,7 @@ function set(p: Partial<typeof snapshot>) {
   listeners.forEach(l => l());
 }
 export function setMaintenancePreferences(p: Partial<Preferences>) {
+  if (p.channel !== undefined && p.channel !== prefs.channel && (snapshot.busy || snapshot.downloading)) return;
   prefs = { ...prefs, ...p };
   try { localStorage.setItem(KEY, JSON.stringify(prefs)); } catch { /* retain session preference */ }
   if (p.channel !== undefined) set({ prefs, result: null, error: "", checked: "", downloaded: null, downloadError: "" });
@@ -24,6 +25,7 @@ export function setMaintenancePreferences(p: Partial<Preferences>) {
 let pending: Promise<void> | null = null;
 export function checkMaintenance() {
   if (pending) return pending;
+  if (snapshot.downloading) return Promise.resolve();
   const channel = prefs.channel;
   set({ busy: true, error: "", result: null });
   pending = api.manualUpdateCheck(channel).then(result => {

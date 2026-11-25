@@ -12,3 +12,8 @@ The v1.2.9 candidate workflow remains build-only, preserving the user-verified v
 
 ## Local recovery archive
 Completed verified downloads receive a bounded receipt in application data. History lists up to 20 receipts, not installed versions. Files remain in their original download folders; no installer is removed automatically. On a user request, the app checks that the recorded directory and DMG are ordinary non-symlink paths directly under Downloads, rechecks size and SHA-256, and reveals only that file in Finder. No install, privilege escalation, automatic rollback, download of historical packages, or modification of current app/data. Keep a copy of the current working application or installer separately before replacement; older app/data compatibility is not guaranteed. Existing pre-feature downloads are not silently imported.
+## Update acceptance increment
+- A newly detected app version is announced once per launch using a nonblocking toast. No automatic download, navigation, installation or network-mode changes.
+- Update channel changes and repeated update checks are refused while an operation would become inconsistent.
+- Dedicated browser fixture mounts the real update and archive UI, stubs only native commands, blocks external requests, and checks read-only detection, deduplication, user-initiated download, busy state, failure display, and archived installer visibility. Native download, Finder and OS authorization remain separate on-device acceptance steps.
+- This follow-up branch intentionally leaves the running archive CI on PR #12 untouched. Merge into that branch only after its build has passed. No release or scheduled job is enabled.

@@ -1,0 +1,44 @@
+// Real update UI, mocked native transport; no content service or external network.
+import assert from "node:assert/strict";
+import { createServer } from "vite";
+import { chromium } from "playwright-core";
+let vite,browser;
+try {
+  vite=await createServer({server:{host:"127.0.0.1",port:0,strictPort:false}});
+  await vite.listen();
+  const origin=vite.resolvedUrls.local[0];
+  browser=await chromium.launch({headless:true,executablePath:process.env.BROWSER_EXECUTABLE||undefined});
+  const page=await browser.newPage({userAgent:"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"});
+  const external=[],errors=[];
+  page.on("pageerror",e=>errors.push(e.message));
+  await page.route("**/*",route=>{if(new URL(route.request().url()).origin===new URL(origin).origin)return route.continue();external.push(route.request().url());return route.abort();});
+  await page.goto(origin+"tests/maintenance.html");
+  await page.waitForFunction(()=>!!window.maintenanceFixture);
+  await page.getByRole("button",{name:"检查更新",exact:true}).waitFor();
+  await page.evaluate(()=>window.maintenanceFixture.check());
+  await page.getByRole("button",{name:"检查中…",exact:true}).waitFor();
+  assert.deepEqual(await page.evaluate(()=>window.maintenanceFixture.counts()),{checks:1,downloads:0,reveals:0});
+  await page.evaluate(()=>window.maintenanceFixture.finishCheck());
+  await page.getByText("Local test version",{exact:true}).waitFor();
+  assert.equal((await page.evaluate(()=>window.maintenanceFixture.counts())).downloads,0,"checking must not download");
+  await page.getByRole("button",{name:"下载安装包",exact:true}).click();
+  await page.getByRole("button",{name:"下载并校验中…",exact:true}).waitFor();
+  await page.evaluate(()=>{window.maintenanceFixture.downloadAgain();window.maintenanceFixture.switchChannel();window.maintenanceFixture.check();});
+  assert.deepEqual(await page.evaluate(()=>window.maintenanceFixture.counts()),{checks:1,downloads:1,reveals:0});
+  assert.equal(await page.locator("select").inputValue(),"stable");
+  await page.getByText("0.5 / 1.0 MB",{exact:true}).waitFor();
+  await page.evaluate(()=>window.maintenanceFixture.finishDownload());
+  await page.getByText(/文件完整性校验通过/).waitFor();
+  await page.getByRole("button",{name:/本地安装包与恢复记录/}).click();
+  await page.getByText("v1.2.98",{exact:true}).waitFor();
+  await page.getByRole("button",{name:"重新校验并定位文件",exact:true}).click();
+  await page.getByText(/已重新验证文件并在 Finder 中定位/).waitFor();
+  assert.equal((await page.evaluate(()=>window.maintenanceFixture.counts())).reveals,1);
+  await page.evaluate(()=>window.maintenanceFixture.newCheck());
+  await page.getByRole("button",{name:"检查更新",exact:true}).click();
+  await page.evaluate(()=>window.maintenanceFixture.failCheck());
+  await page.getByText("fixture unavailable",{exact:true}).waitFor();
+  assert.deepEqual(errors,[]);
+  assert.deepEqual(external,[]);
+  console.log("PASS: update check, deduplication, explicit download, progress, local archive, failure and no external requests");
+}finally{await browser?.close();await vite?.close();}
