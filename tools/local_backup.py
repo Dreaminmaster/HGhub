@@ -25,7 +25,9 @@ def overlaps(a, b):
 
 def manifest(root):
     result = {}
-    for folder, dirs, files in os.walk(root, topdown=True, followlinks=False):
+    def fail_walk(error):
+        raise error
+    for folder, dirs, files in os.walk(root, topdown=True, followlinks=False, onerror=fail_walk):
         for name in sorted(dirs + files):
             p = Path(folder) / name
             rel = p.relative_to(root).as_posix()
@@ -76,11 +78,14 @@ def backup(app, data, parent):
                 raise ValueError("Source changed or copy verification failed: " + name)
         if manifest(app) != before["application"] or manifest(data) != before["data"]:
             raise ValueError("Source changed during backup.")
-        with (output / "verified-receipt.json").open("x", encoding="utf-8") as f:
+        # The final receipt name is visible only after a complete, flushed write.
+        pending = output / ".receipt-incomplete.json"
+        with pending.open("x", encoding="utf-8") as f:
             os.fchmod(f.fileno(), 0o600)
             json.dump({"schema": 1, "app_name": app.name, "manifest": before}, f, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
+        pending.rename(output / "verified-receipt.json")
         return output
     except Exception:
         # Preserve a failed copy for the user's review; no automatic recursive deletion.

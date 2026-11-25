@@ -48,6 +48,26 @@ class BackupTests(unittest.TestCase):
             module.backup(self.app, self.data, self.dest)
         self.assertEqual(list(self.dest.iterdir()), [])
 
+    def test_walk_error_is_not_silently_ignored(self):
+        def unreadable(*args, **kwargs):
+            kwargs["onerror"](PermissionError("fixture directory unreadable"))
+            return iter(())
+        with patch.object(module.os, "walk", side_effect=unreadable):
+            with self.assertRaises(PermissionError):
+                module.manifest(self.data)
+
+    def test_receipt_write_failure_does_not_publish_success(self):
+        def fail_write(obj, f, **kwargs):
+            f.write("{")
+            raise OSError("fixture receipt write failure")
+        with patch.object(module.json, "dump", side_effect=fail_write):
+            with self.assertRaises(OSError):
+                module.backup(self.app, self.data, self.dest)
+        outputs = list(self.dest.iterdir())
+        self.assertEqual(len(outputs), 1)
+        self.assertFalse((outputs[0] / "verified-receipt.json").exists())
+        self.assertEqual((self.data / "settings.json").read_text(), '{"version":1}')
+
     def test_copy_failure_does_not_produce_verified_receipt(self):
         with patch.object(module.subprocess, "run", side_effect=OSError("fixture write failure")):
             with self.assertRaises(OSError):
