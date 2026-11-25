@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type ManualUpdateInfo, type DownloadedUpdate } from "./api";
-type Channel = "stable" | "beta";
-type Preferences = { autoCheck: boolean; channel: Channel };
+import type { MaintenancePreferences as Preferences } from "./maintenanceBackup";
 const KEY = "hghub_maintenance_preferences_v1";
 let prefs: Preferences = { autoCheck: true, channel: "stable" };
 try {
@@ -15,12 +14,17 @@ function set(p: Partial<typeof snapshot>) {
   snapshot = { ...snapshot, ...p };
   listeners.forEach(l => l());
 }
-export function setMaintenancePreferences(p: Partial<Preferences>) {
-  if (p.channel !== undefined && p.channel !== prefs.channel && (snapshot.busy || snapshot.downloading)) return;
-  prefs = { ...prefs, ...p };
-  try { localStorage.setItem(KEY, JSON.stringify(prefs)); } catch { /* retain session preference */ }
-  if (p.channel !== undefined) set({ prefs, result: null, error: "", checked: "", downloaded: null, downloadError: "" });
+export function setMaintenancePreferences(p: Partial<Preferences>): boolean {
+  if (p.channel !== undefined && p.channel !== prefs.channel && (snapshot.busy || snapshot.downloading)) return false;
+  const previousChannel = prefs.channel;
+  const next = { ...prefs, ...p };
+  let persisted = true;
+  try { localStorage.setItem(KEY, JSON.stringify(next)); } catch { persisted = false; }
+  // Keep existing session-only behavior for ordinary controls, but report persistence.
+  prefs = next;
+  if (prefs.channel !== previousChannel) set({ prefs, result: null, error: "", checked: "", downloaded: null, downloadError: "" });
   else set({ prefs });
+  return persisted;
 }
 let pending: Promise<void> | null = null;
 export function checkMaintenance() {

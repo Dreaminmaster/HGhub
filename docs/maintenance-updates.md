@@ -20,3 +20,6 @@ Completed verified downloads receive a bounded receipt in application data. Hist
 
 ## Isolated UI acceptance
 The normal macOS workflow targets pull requests into main, which explains why PR #13 (targeting a development branch) has no run. A separate Ubuntu UI-only workflow checks the maintenance fixture on pushes to the acceptance branch. It uses mocked native calls, blocks external browser requests, does not run native packaging, import service adapters or publish artifacts. Download failure and retry are now covered explicitly.
+
+## Portable maintenance preferences
+The update preferences panel can generate a local, versioned JSON backup and validate a pasted backup before applying it with explicit confirmation. Only two values are accepted (autoCheck, channel); reject unknown fields, malformed values, oversized input and unknown schemas. Restore does not download, initiate a check, import credentials or change network/proxy configuration. Persistence failure is surfaced; an in-memory change may remain for the current session. This is not an application or user-data backup. Preserve a separate local copy of the working app and its data before installing any replacement. No automatic full-data export, deletion or restoration. No new release or content adapter changes.
