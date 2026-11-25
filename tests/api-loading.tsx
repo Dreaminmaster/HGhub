@@ -11,6 +11,8 @@ const fixture = {
   history: [] as { cmd: string; args: Record<string, unknown> }[],
   debug: [] as string[],
   ready: false,
+  diagnosticDelay: false,
+  finishDiagnostic: null as null | (() => void),
   setActive: (_active: boolean) => {},
   complete(cmd: string, key: string, result: "404" | "503" | "empty" | "item") {
     const index = pending.findIndex(r => r.cmd === cmd && (!key || r.args.cate === key));
@@ -37,6 +39,15 @@ Object.assign(window, {
   __TAURI_INTERNALS__: { invoke(cmd: string, args: Record<string, unknown> = {}) {
     if (cmd === "app_boot") return Promise.resolve({ user: null, logged_in: false, base: "https://fixture.invalid" });
     if (cmd === "debug_log") { fixture.debug.push(String(args.msg)); return Promise.resolve(); }
+    if (cmd === "net_diag") {
+      const result = {
+        http: { status: 200 }, api: { ok: false, status: 503, error_kind: "http_error" },
+        proxy: { mode: "warp", warp_running: true },
+        backup: { origin: "https://fixture.invalid", api: { ok: false, status: 502 } },
+      };
+      if (!fixture.diagnosticDelay) return Promise.resolve(result);
+      return new Promise(resolve => { fixture.finishDiagnostic = () => { fixture.finishDiagnostic = null; resolve(result); }; });
+    }
     if (!["api_feed", "api_category", "api_posts"].includes(cmd)) return Promise.reject(`Unexpected IPC: ${cmd}`);
     fixture.history.push({ cmd, args });
     return new Promise((resolve, reject) => pending.push({ cmd, args, resolve, reject }));

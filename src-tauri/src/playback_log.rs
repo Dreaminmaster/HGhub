@@ -54,6 +54,8 @@ pub fn error_kind(error: &str) -> &'static str {
         } else {
             "target_policy_denied"
         }
+    } else if error.starts_with("内容接口返回") {
+        "unexpected_api_response"
     } else if error.contains("DNS") {
         "dns_error"
     } else if error.contains("超时") || error.to_ascii_lowercase().contains("timeout") {

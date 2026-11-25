@@ -649,6 +649,28 @@ fn dns_summary(addrs: impl IntoIterator<Item = SocketAddr>) -> Value {
 }
 
 /// 网络自检：DNS / HTTP / 代理相关环境变量，用于远程定位「打不开」。
+/// One anonymous, bounded, read-only legacy API check, with no fallback or retries.
+pub async fn probe_content(origin: &str) -> Value {
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(12),
+        edge_once(origin, "GET", "/api/videos?page=1&size=1", None, None, false),
+    ).await;
+    let ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(Ok(value)) if valid_feed(&value) => json!({"ok":true,"ms":ms}),
+        Ok(Ok(_)) => json!({"ok":false,"ms":ms,"error_kind":"unexpected_feed_format"}),
+        Ok(Err(error)) => json!({"ok":false,"ms":ms,
+            "error_kind":crate::playback_log::error_kind(&error),
+            "status":http_error_status(&error)}),
+        Err(_) => json!({"ok":false,"ms":ms,"error_kind":"timeout"}),
+    }
+}
+
+fn valid_feed(value: &Value) -> bool {
+    value.get("items").and_then(Value::as_array).is_some()
+}
+
 pub async fn diagnose() -> Value {
     let cur = base();
     let host = url::Url::parse(&cur)
@@ -656,52 +678,50 @@ pub async fn diagnose() -> Value {
         .and_then(|u| u.host_str().map(|h| h.to_string()))
         .unwrap_or_default();
 
-    // fake-ip（198.18.0.0/15）说明 DNS 被 TUN 接管：关掉 TUN 后这个地址根本不可路由。
-    let dns = {
-        let host = host.clone();
-        tokio::task::spawn_blocking(move || {
-            use std::net::ToSocketAddrs;
-            match (host.as_str(), 443u16).to_socket_addrs() {
-                Ok(iter) => dns_summary(iter),
-                Err(_) => json!({ "error": "DNS 解析失败" }),
+    // All probes are independently bounded and run concurrently. Local DNS
+    // failure does not prove a proxy-side DNS failure.
+    let mode_before = proxy_state();
+    let warp_running = if mode_before["mode"] == "warp" {
+        Some(crate::warp::proxy_url().is_some())
+    } else {
+        None
+    };
+    let (dns, http, api_check, backup_check) = tokio::join!(
+        async {
+            match tokio::time::timeout(
+                Duration::from_secs(4),
+                tokio::net::lookup_host((host.as_str(), 443u16)),
+            ).await {
+                Ok(Ok(iter)) => dns_summary(iter),
+                Ok(Err(_)) => json!({"error":"DNS 解析失败"}),
+                Err(_) => json!({"error":"DNS 解析超时"}),
             }
-        })
-        .await
-        .unwrap_or(Value::Null)
-    };
-
-    let started = Instant::now();
-    let http = match get(&format!("{cur}/"), Duration::from_secs(20), None, None).await {
-        Ok(r) => json!({
-            "status": r.status().as_u16(),
-            "ms": started.elapsed().as_millis() as u64,
-        }),
-        Err(e) => json!({
-            "error": e,
-            "ms": started.elapsed().as_millis() as u64,
-        }),
-    };
-
-    // 首页 HTTP 200 并不等于内容接口正常；额外检测匿名列表的真实 API。
-    // 使用用户选中的主线路，诊断不自动代替主线路，最长耗时 12 秒。
-    let api_started = Instant::now();
-    let api_result = tokio::time::timeout(
-        Duration::from_secs(12),
-        edge_once(&cur, "GET", "/api/videos?page=1&size=1", None, None)
-    ).await;
-    let api_check = match api_result {
-        Ok(Ok(_)) => json!({"ok":true, "ms":api_started.elapsed().as_millis() as u64}),
-        Ok(Err(error)) => json!({
-            "ok":false, "ms":api_started.elapsed().as_millis() as u64,
-            "error_kind":crate::playback_log::error_kind(&error),
-        }),
-        Err(_) => json!({"ok":false, "ms":api_started.elapsed().as_millis() as u64, "error_kind":"timeout"}),
-    };
+        },
+        async {
+            let started = Instant::now();
+            match get(&format!("{cur}/"), Duration::from_secs(8), None, None).await {
+                Ok(r) => json!({"status":r.status().as_u16(),"ms":started.elapsed().as_millis() as u64}),
+                Err(e) => json!({"error_kind":crate::playback_log::error_kind(&e),"ms":started.elapsed().as_millis() as u64}),
+            }
+        },
+        probe_content(&cur),
+        async {
+            if let Some(origin) = automatic_backup(&cur) {
+                json!({"origin":origin,"api":probe_content(origin).await})
+            } else {
+                Value::Null
+            }
+        }
+    );
+    let settings_changed = cur != base() || mode_before != proxy_state()
+        || warp_running.is_some_and(|running| running != crate::warp::proxy_url().is_some());
 
     json!({
         "base": cur,
         "host": host,
         "api": api_check,
+        "backup": backup_check,
+        "settings_changed": settings_changed,
         "auto_line_recovery": "仅匿名 GET 遇到网络或临时网关故障时尝试两条内置固定线路",
         "secure_dns": {
             "mode": "automatic_fallback_on_local_dns_error",
@@ -709,7 +729,8 @@ pub async fn diagnose() -> Value {
             "note": "仅向加密 DNS 提交域名；DNS 恢复不代表网站或视频服务可访问",
         },
         "proxy": {
-            "mode": proxy_state()["mode"],
+            "mode": mode_before["mode"],
+            "warp_running": warp_running,
             "address": PROXY_SETTINGS.read().ok().and_then(|p| {
                 let selected = effective_proxy(&p);
                 selected.map(|s| redact_proxy(&s))
@@ -728,16 +749,24 @@ pub async fn diagnose() -> Value {
     })
 }
 
+/// Accept both reqwest's "HTTP 503 Service Unavailable" and "HTTP 503: ...".
+fn http_error_status(error: &str) -> Option<u16> {
+    let suffix = error.strip_prefix("HTTP ")?;
+    let code = suffix.get(..3)?;
+    if !code.bytes().all(|b| b.is_ascii_digit()) ||
+        suffix.as_bytes().get(3).is_some_and(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    code.parse().ok()
+}
+
 fn retryable_error(error: &str) -> bool {
     if error == "401" {
         return false;
     }
-    if let Some(status) = error
-        .strip_prefix("HTTP ")
-        .and_then(|s| s.split_whitespace().next())
-        .and_then(|s| s.parse::<u16>().ok())
-    {
-        return matches!(status, 408 | 425 | 429 | 500..=599);
+    if let Some(status) = http_error_status(error) {
+        // A rate limit is not a request to retry immediately.
+        return matches!(status, 408 | 425 | 500..=599);
     }
     !matches!(
         crate::playback_log::error_kind(error),
@@ -745,6 +774,7 @@ fn retryable_error(error: &str) -> bool {
             | "private_address_denied"
             | "target_policy_denied"
             | "redirect_error"
+            | "unexpected_api_response"
     )
 }
 
@@ -763,12 +793,16 @@ where
             Ok(v) => return Ok(v),
             Err(e) => {
                 last = e;
-                if !retryable_error(&last) {
+                let unavailable = http_error_status(&last) == Some(503);
+                // 503: at most one retry on the same origin. A new origin is still
+                // subject to the existing anonymous-read/trusted-source policy.
+                if !retryable_error(&last) || (unavailable && attempt >= 1) {
                     return Err(last);
                 }
                 heal_client(&last);
                 if attempt + 1 < attempts {
-                    tokio::time::sleep(Duration::from_millis(350 * (attempt as u64 + 1))).await;
+                    let delay_ms = if unavailable { 1500 } else { 350 * (attempt as u64 + 1) };
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }
             }
         }
@@ -826,9 +860,7 @@ fn automatic_backup(origin: &str) -> Option<&'static str> {
 
 /// 仅网络或临时网关故障可触发备用，不把鉴权失败、业务错误或 TLS 证书拒绝当作“被屏蔽”。
 fn temporary_route_error(error: &str) -> bool {
-    if let Some(status) = error.strip_prefix("HTTP ")
-        .and_then(|v| v.split(|c: char| !c.is_ascii_digit()).next())
-        .and_then(|v| v.parse::<u16>().ok()) {
+    if let Some(status) = http_error_status(error) {
         return matches!(status, 408 | 502 | 503 | 504 | 520..=524);
     }
     let msg = error.to_ascii_lowercase();
@@ -858,9 +890,12 @@ fn may_recover_with_backup(
     // 只读播放地址查询虽然使用 POST，但无副作用（项目原有重试策略已明确）。
     let safe_read = (method.eq_ignore_ascii_case("GET") && !has_body)
         || (method.eq_ignore_ascii_case("POST") && edge_operation(path) == "play");
+    let incompatible_feed = edge_operation(path) == "feed"
+        && method.eq_ignore_ascii_case("GET")
+        && error.starts_with("内容接口返回");
     automatic_backup(origin).is_some()
         && safe_read && !has_token
-        && temporary_route_error(error)
+        && (temporary_route_error(error) || incompatible_feed)
 }
 
 /// 默认自动恢复：匿名读取或只读的播放地址查询失败时，尝试另一条内置固定线路。
@@ -872,23 +907,26 @@ pub async fn edge(
     body: Option<Value>,
     token: Option<&str>,
 ) -> Result<Value, String> {
-    let first = edge_once(origin, method, path, body.clone(), token).await;
+    let first = edge_once(origin, method, path, body.clone(), token, true).await;
     match first {
         Err(first_error) if may_recover_with_backup(origin, method, path, body.is_some(), token.is_some(), &first_error) => {
             let backup = automatic_backup(origin).expect("经过备用线路白名单验证");
             crate::playback_log::record("api.trusted_fallback", json!({
                 "operation": edge_operation(path), "from": origin, "to": backup,
             }));
-            match edge_once(backup, method, path, body, None).await {
+            match edge_once(backup, method, path, body, None, true).await {
                 Ok(value) => {
                     crate::playback_log::record("api.trusted_fallback_success", json!({
                         "operation": edge_operation(path), "source": backup,
                     }));
                     Ok(value)
                 }
-                Err(_) => {
+                Err(backup_error) => {
                     crate::playback_log::record("api.trusted_fallback_failed", json!({
                         "operation": edge_operation(path),
+                        "primary_status": http_error_status(&first_error),
+                        "backup_status": http_error_status(&backup_error),
+                        "backup_error_kind": crate::playback_log::error_kind(&backup_error),
                     }));
                     // 避免把备用站点的未知错误覆盖到用户实际选择的线路。
                     Err(first_error)
@@ -906,6 +944,7 @@ async fn edge_once(
     path: &str,
     body: Option<Value>,
     token: Option<&str>,
+    allow_retry: bool,
 ) -> Result<Value, String> {
     let cur = normalize_base(origin).ok_or("业务请求必须使用安全 HTTPS 线路")?;
     if network_policy::strict_security()
@@ -947,8 +986,8 @@ async fn edge_once(
     let mut attempt = 0;
     let guest_get = method.eq_ignore_ascii_case("GET") && body.is_none() && token.is_none();
     // 取播放地址的 POST 没有副作用，和 GET 一样允许重试
-    let can_retry = (method.eq_ignore_ascii_case("GET") && body.is_none())
-        || (method.eq_ignore_ascii_case("POST") && operation == "play");
+    let can_retry = allow_retry && ((method.eq_ignore_ascii_case("GET") && body.is_none())
+        || (method.eq_ignore_ascii_case("POST") && operation == "play"));
     let value = with_retry(can_retry, || {
         attempt += 1;
         let attempt = attempt;
@@ -1000,21 +1039,24 @@ async fn edge_once(
                         next = edge_redirect_target(&target, status.as_u16(), location, guest_get)?;
                         continue;
                     }
-                    let text = resp.text().await.map_err(|e| err_text(&e))?;
                     if status.as_u16() == 401 || status.as_u16() == 403 {
-                        return Err("401".to_string());
+                        // Preserve the actual status for the read-only diagnostic;
+                        // normal business calls retain the legacy session handling.
+                        return Err(if allow_retry { "401".to_string() } else { format!("HTTP {status}") });
                     }
                     if !status.is_success() {
-                        return Err(format!(
-                            "HTTP {status}: {}",
-                            text.chars().take(160).collect::<String>()
-                        ));
+                        // Never log raw upstream HTML or response bodies, which may contain user data.
+                        return Err(format!("HTTP {status}"));
                     }
+                    if response_kind == "html" {
+                        return Err("内容接口返回网页而非 JSON".into());
+                    }
+                    let text = resp.text().await.map_err(|e| err_text(&e))?;
                     if text.trim().is_empty() {
                         return Ok(Value::Null);
                     }
                     return serde_json::from_str::<Value>(&text)
-                        .map_err(|e| format!("{e}: {}", text.chars().take(160).collect::<String>()));
+                        .map_err(|_| "内容接口返回无效 JSON".to_string());
                 }
                 Err("重定向次数超过限制".into())
             }.await;
@@ -1033,11 +1075,18 @@ async fn edge_once(
     .await?;
 
     if value.is_null() {
+        if operation == "feed" {
+            return Err("内容接口返回空响应，无法读取首页".into());
+        }
         return Ok(Value::Null);
     }
 
     if value.get("status").and_then(|v| v.as_i64()) == Some(1) {
-        Ok(value.get("data").cloned().unwrap_or(Value::Null))
+        let data = value.get("data").cloned().unwrap_or(Value::Null);
+        if operation == "feed" && !valid_feed(&data) {
+            return Err("内容接口返回不兼容的首页数据格式".into());
+        }
+        Ok(data)
     } else {
         Err(value
             .get("msg")
@@ -1094,11 +1143,50 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn unavailable_origin_is_not_retried_indefinitely() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let result = with_retry(true, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>("HTTP 503 Service Unavailable".to_string())
+        }).await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn feed_shape_requires_items_array_and_fallback_respects_credentials() {
+        assert!(valid_feed(&json!({"items":[]})));
+        assert!(!valid_feed(&Value::Null));
+        assert!(!valid_feed(&json!({"items":{}})));
+        assert!(!valid_feed(&json!({"other":[]})));
+        let path = "/api/videos?page=1&size=1";
+        let error = "内容接口返回不兼容的首页数据格式";
+        assert!(may_recover_with_backup("https://huangguoai.com", "GET", path, false, false, error));
+        assert!(!may_recover_with_backup("https://huangguoai.com", "GET", path, false, true, error));
+        assert!(!may_recover_with_backup("https://huangguoai.com", "POST", path, true, false, error));
+        assert!(!may_recover_with_backup("https://untrusted.invalid", "GET", path, false, false, error));
+    }
+
+    #[test]
+    fn status_parsing_accepts_colon_and_reason_phrase() {
+        assert_eq!(http_error_status("HTTP 503: gateway"), Some(503));
+        assert_eq!(http_error_status("HTTP 503 Service Unavailable"), Some(503));
+        assert_eq!(http_error_status("HTTP 5030"), None);
+        assert!(!retryable_error("HTTP 403: denied"));
+        assert!(!retryable_error("HTTP 404: missing"));
+        assert!(retryable_error("HTTP 503: unavailable"));
+        assert!(!retryable_error("内容接口返回网页而非 JSON"));
+        assert!(!retryable_error("内容接口返回无效 JSON"));
+    }
+
+    #[tokio::test]
     async fn terminal_errors_do_not_retry_but_transient_failures_can_recover() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         for error in [
             "HTTP 404 Not Found: <html>nginx</html>",
             "HTTP 403 Forbidden",
+            "HTTP 429 Too Many Requests",
             "401",
             "禁止访问内网",
             "重定向次数超过限制",

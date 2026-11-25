@@ -51,11 +51,35 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
     // 落盘完整错误链（dns error / connection refused / 证书错误…），toast 只显示截断版
     logLine(`[api] ${cmd} → ${msg}`);
     const status = /^HTTP (\d{3})\b/.exec(msg)?.[1];
+    if (status === "503") {
+      throw new Error("内容服务暂不可用（HTTP 503）。这不一定是代理故障，暂时不要反复切换网络。");
+    }
     if (status) {
-      throw new Error(`服务器请求失败（HTTP ${status}），请稍后重试或在设置中切换线路`);
+      throw new Error(`服务器请求失败（HTTP ${status}），请稍后重试或检查连接`);
     }
     throw new Error(msg.length > 140 ? `${msg.slice(0, 140)}…` : msg);
   }
+}
+
+export function describeNetworkDiagnostic(res: Record<string, unknown>): string {
+  const http = res.http as { status?: number } | undefined;
+  const check = res.api as { ok?: boolean; ms?: number; status?: number; error_kind?: string } | undefined;
+  const proxy = res.proxy as { mode?: string; warp_running?: boolean | null } | undefined;
+  if (res.settings_changed === true) return "检测期间网络或线路设置发生变化，请重新检测。";
+  const mode = ({ system: "跟随系统", direct: "直连", custom: "手动代理", warp: "内置 WARP" } as Record<string, string>)[proxy?.mode || ""] || "未知";
+  const transport = mode + (proxy?.mode === "warp" && proxy.warp_running === false ? "（本地组件未运行）" : "");
+  const homepage = http?.status ? "网页 HTTP " + http.status : "网页未响应";
+  const labels: Record<string, string> = {
+    timeout: "检测超时", dns_error: "DNS 解析失败", transport_error: "连接失败或服务拒绝",
+    unexpected_api_response: "接口返回网页或无效 JSON", unexpected_feed_format: "内容数据格式不符合旧版协议",
+  };
+  const api = check?.ok ? "内容接口正常" : check?.status ? "内容接口 HTTP " + check.status :
+    "内容接口未通过：" + (labels[check?.error_kind || ""] || check?.error_kind || "未知");
+  const backup = res.backup as { origin?: string; api?: LineApiProbe } | null | undefined;
+  const secondary = backup?.api
+    ? "；备用线路：" + (backup.api.ok ? "内容接口正常" : backup.api.status ? "HTTP " + backup.api.status : labels[backup.api.error_kind || ""] || "检测未通过")
+    : "";
+  return transport + "；" + homepage + "；" + api + secondary + (check?.status === 503 ? "。服务暂不可用，无法仅凭此判断是出口还是源站故障。" : "。");
 }
 
 /* ── 接口 ───────────────────────────────────────────────── */
@@ -143,7 +167,8 @@ export type ProxyState = { mode: "system" | "direct" | "custom" | "warp"; url: s
 export type WarpStatus = { available: boolean; registered: boolean; running: boolean; active: boolean; transport?: string | null; mode?: string };
 export type LineState = { base: string; default: string; fixed: LineItem[] };
 export type LineMirrors = { source: string; script?: string; items: LineItem[] };
-export type LineProbe = { url: string; ok: boolean; status?: number; ms: number; error?: string };
+export type LineApiProbe = { ok: boolean; ms?: number; status?: number | null; error_kind?: string };
+export type LineProbe = { url: string; ok: boolean; status?: number | null; ms: number; error?: string | null; website_ok?: boolean; api?: LineApiProbe | null };
 
 /** `https://a.b/c` → `a.b`（线路展示用） */
 export const hostOf = (url: string) => {
