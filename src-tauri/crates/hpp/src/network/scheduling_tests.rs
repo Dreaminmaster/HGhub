@@ -52,7 +52,7 @@ async fn fixture() -> (String, Arc<Fixture>, tokio::task::JoinHandle<()>) {
         seen: Default::default(),
         release: Semaphore::new(0),
     });
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     let router = Router::new()
         .route("/*path", any(serve))
@@ -246,7 +246,13 @@ async fn shared_waiters_keep_own_timeout_and_credentials_never_merge() {
 #[tokio::test]
 async fn api_limits_cover_bodies_and_leave_other_hosts_and_media_available() {
     let (base, fixture, server) = fixture().await;
-    let other = base.replace("127.0.0.1", "127.0.0.2");
+    // macOS need not route 127.0.0.2 to lo0 unless an alias is configured.
+    // Distinct URL host keys, not distinct IP addresses, are what this test exercises.
+    let other = base.replace("127.0.0.1", "localhost");
+    let port = url::Url::parse(&other).unwrap().port().unwrap();
+    tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(("localhost", port)))
+        .await.expect("localhost fixture connection timed out")
+        .expect("localhost must resolve to the local fixture");
     let dir = tempfile::tempdir().unwrap();
     let network = network(dir.path());
     let cancel = CancellationToken::new();
