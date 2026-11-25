@@ -717,6 +717,9 @@ pub async fn diagnose() -> Value {
         || warp_running.is_some_and(|running| running != crate::warp::proxy_url().is_some());
 
     json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "checked_at_utc": crate::logging::utc_timestamp().ok(),
+        "os": std::env::consts::OS,
         "base": cur,
         "host": host,
         "api": api_check,

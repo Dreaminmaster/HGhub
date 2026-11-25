@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, hostOf, isMobile, type LineItem, type LineProbe, type LineState } from "../api";
+import { api, describeNetworkDiagnostic, hostOf, isMobile, type LineItem, type LineProbe, type LineState } from "../api";
 import { useStore } from "../store";
 import { Modal, Sheet } from "./ui";
 import { ICheck, IClose, IRefresh, ISettings } from "../icons";
@@ -41,6 +41,27 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
   const [probes, setProbes] = useState<ProbeMap>({});
   const [probing, setProbing] = useState("");
   const [switching, setSwitching] = useState("");
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [diagnostic, setDiagnostic] = useState<{ text: string; json: string } | null>(null);
+
+  const checkCurrent = async () => {
+    setDiagnosing(true);
+    setDiagnostic(null);
+    try {
+      const result = await api.netDiag();
+      setDiagnostic({ text: describeNetworkDiagnostic(result), json: JSON.stringify(result, null, 2) });
+    } catch (e) {
+      setDiagnostic({ text: (e as Error).message || "检测失败", json: "" });
+    } finally { setDiagnosing(false); }
+  };
+  const copyCurrent = async () => {
+    if (!diagnostic?.json) return;
+    try {
+      if (!navigator.clipboard) throw new Error("当前环境不支持剪贴板");
+      await navigator.clipboard.writeText(diagnostic.json);
+      toast("本次网络诊断已复制", "ok");
+    } catch (e) { toast((e as Error).message || "复制失败", "info"); }
+  };
 
   const readState = () => {
     api.lineState().then(setState).catch((e) => toast((e as Error).message || "读取线路失败", "info"));
@@ -88,6 +109,8 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
   const pick = async (url: string) => {
     if (switching || state?.base === url) return;
     setSwitching(url);
+    setDiagnostic(null);
+    setProbes({});
     try {
       const next = await api.lineSet(url);
       if (next !== state?.base) setUser(null);
@@ -101,7 +124,7 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
   };
 
   const fixed = state?.fixed || [];
-  const busyAll = !!probing || !!switching;
+  const busyAll = !!probing || !!switching || diagnosing;
 
   const body = (
     <div className="flex flex-col min-h-0" style={{ maxHeight: isMobile ? "74vh" : "min(72vh, 620px)" }}>
@@ -115,6 +138,15 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
       </div>
 
       <div className="flex-1 scroll-y px-3 pb-4">
+        <div className="rounded-(--r-md) bg-s2 p-3 mb-3">
+          <div className="flex items-center gap-2">
+            <div className="flex-1 text-[12px] text-on">当前线路内容接口诊断</div>
+            <button disabled={busyAll || !state} onClick={() => void checkCurrent()}
+              className="px-3 py-1.5 rounded-(--r-sm) bg-s4 text-primary text-[11px] disabled:opacity-50">{diagnosing ? "检测中…" : "检测当前线路"}</button>
+          </div>
+          {diagnostic && <div className="mt-2 text-[11px] text-mut break-words" role="status">{diagnostic.text}</div>}
+          {diagnostic?.json && <button onClick={() => void copyCurrent()} className="mt-2 text-primary text-[11px]">复制本次网络诊断</button>}
+        </div>
         <div className="flex items-center gap-2 px-1 mt-1 mb-1.5">
           <span className="text-[10.5px] font-semibold text-dim tracking-wide">固定线路</span>
           <span className="text-[10px] text-dim">需代理 / 非大陆网络</span>
@@ -165,7 +197,7 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
         )}
 
         <div className="text-[10px] text-dim leading-relaxed px-1 mt-4">
-          固定线路同时检测内容接口；镜像仅检测网页，不代表能够播放。检测不会自动更改线路或账号。
+          固定线路和当前选中线路检测内容接口；其他线路只检测网页。检测不会自动更改线路或账号。
         </div>
       </div>
     </div>

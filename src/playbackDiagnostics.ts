@@ -13,7 +13,7 @@ export const playbackLogApi = {
   status: () => invoke<Status>("playback_log_status"),
   set: (enabled: boolean) => invoke<Status>("playback_log_set", { enabled }),
   write: (entries: Entry[]) => invoke<void>("playback_log_write", { entries }),
-  read: () => invoke<string>("playback_log_read"),
+  read: () => invoke<string>("playback_log_read", { currentOnly: true }),
 };
 let state: Snapshot = { enabled: false, path: null, error: null, ready: false, pending: false };
 const listeners = new Set<() => void>();
@@ -73,7 +73,7 @@ export async function setPlaybackLog(on: boolean) {
 export async function copyPlaybackLog() {
   await flushPlaybackLog();
   const text = await playbackLogApi.read();
-  if (!text) throw new Error("尚无诊断日志，请开启后复现问题");
+  if (!text) throw new Error("本次启动尚无诊断日志，请开启后复现问题；历史日志仍保存在本机");
   if (!navigator.clipboard) throw new Error("当前环境无法使用剪贴板，请从日志目录取出 playback.log");
   await navigator.clipboard.writeText(text);
 }

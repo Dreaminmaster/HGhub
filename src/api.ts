@@ -79,7 +79,8 @@ export function describeNetworkDiagnostic(res: Record<string, unknown>): string 
   const secondary = backup?.api
     ? "；备用线路：" + (backup.api.ok ? "内容接口正常" : backup.api.status ? "HTTP " + backup.api.status : labels[backup.api.error_kind || ""] || "检测未通过")
     : "";
-  return transport + "；" + homepage + "；" + api + secondary + (check?.status === 503 ? "。服务暂不可用，无法仅凭此判断是出口还是源站故障。" : "。");
+  const origin = typeof res.host === "string" && res.host ? "当前：" + res.host + "；" : "";
+  return origin + transport + "；" + homepage + "；" + api + secondary + (check?.status === 503 ? "。服务暂不可用，无法仅凭此判断是出口还是源站故障。" : "。");
 }
 
 /* ── 接口 ───────────────────────────────────────────────── */
