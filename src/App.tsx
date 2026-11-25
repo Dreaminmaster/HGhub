@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStore, type Page, type Tab } from "./store";
 import { isMobile, selfTest } from "./api";
-import { useStartupUpdateCheck } from "./maintenance";
+import { useMaintenance, useStartupUpdateCheck } from "./maintenance";
 import { addPluginListener, invoke } from "@tauri-apps/api/core";
 import { runBack } from "./back";
 import Home from "./pages/Home";
@@ -230,8 +230,17 @@ function MobileShell() {
 
 /* ============ 入口 ============ */
 export default function App() {
-  const { platform, loginOpen, setLoginOpen, tab, setTab, stack, pop, fs, setFs } = useStore();
+  const { platform, loginOpen, setLoginOpen, tab, setTab, stack, pop, fs, setFs, toast } = useStore();
   useStartupUpdateCheck(platform);
+  const { result: maintenanceResult, downloading: maintenanceDownloading } = useMaintenance();
+  const announcedVersions = useRef(new Set<string>());
+  useEffect(() => {
+    if (platform !== "macos" || maintenanceDownloading || maintenanceResult?.status !== "available" || !maintenanceResult.version) return;
+    const version = maintenanceResult.version;
+    if (announcedVersions.current.has(version)) return;
+    announcedVersions.current.add(version);
+    toast(`发现软件更新 v${version}，请在设置中查看`, "info");
+  }, [platform, maintenanceResult, maintenanceDownloading, toast]);
   useEffect(() => {
     tracePlayback("navigation.change", { tab, stack: stack.map(p => ({ page: p.kind, key: p.key })), login_open: loginOpen });
   }, [tab, stack, loginOpen]);

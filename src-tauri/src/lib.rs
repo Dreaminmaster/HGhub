@@ -12,6 +12,10 @@ mod warp;
 mod updates;
 #[cfg(target_os = "macos")]
 mod update_archive;
+#[cfg(target_os = "macos")]
+mod update_archive_core;
+#[cfg(target_os = "macos")]
+mod update_integrity;
 
 use api::Api;
 use tauri::Manager;
