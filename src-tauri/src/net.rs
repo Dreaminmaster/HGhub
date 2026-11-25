@@ -686,7 +686,8 @@ pub async fn diagnose() -> Value {
     } else {
         None
     };
-    let (dns, http, api_check, backup_check) = tokio::join!(
+    let warp_url_before = if mode_before["mode"] == "warp" { crate::warp::proxy_url() } else { None };
+    let (dns, http, api_check, backup_check, warp_egress) = tokio::join!(
         async {
             match tokio::time::timeout(
                 Duration::from_secs(4),
@@ -711,10 +712,17 @@ pub async fn diagnose() -> Value {
             } else {
                 Value::Null
             }
+        },
+        async {
+            if mode_before["mode"] == "warp" {
+                crate::warp::diagnose_egress().await
+            } else {
+                Value::Null
+            }
         }
     );
     let settings_changed = cur != base() || mode_before != proxy_state()
-        || warp_running.is_some_and(|running| running != crate::warp::proxy_url().is_some());
+        || (mode_before["mode"] == "warp" && warp_url_before != crate::warp::proxy_url());
 
     json!({
         "version": env!("CARGO_PKG_VERSION"),
@@ -734,6 +742,7 @@ pub async fn diagnose() -> Value {
         "proxy": {
             "mode": mode_before["mode"],
             "warp_running": warp_running,
+            "warp_egress": warp_egress,
             "address": PROXY_SETTINGS.read().ok().and_then(|p| {
                 let selected = effective_proxy(&p);
                 selected.map(|s| redact_proxy(&s))
