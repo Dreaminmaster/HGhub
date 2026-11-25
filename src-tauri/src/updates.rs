@@ -128,8 +128,8 @@ pub async fn manual_update_download(app:tauri::AppHandle,channel:String,version:
     channel_ok(&channel)?;
     #[cfg(target_os="macos")]
     {
-        use sha2::{Digest,Sha256};
-        use std::{io::Write,time::{Duration,SystemTime,UNIX_EPOCH}};
+        use crate::update_integrity::VerifiedStream;
+        use std::time::{Duration,SystemTime,UNIX_EPOCH};
         use tauri::Manager;
         use tauri_plugin_opener::OpenerExt;
         if BUSY.swap(true,Ordering::AcqRel){return Err("已有下载正在进行".into());}
@@ -149,20 +149,16 @@ pub async fn manual_update_download(app:tauri::AppHandle,channel:String,version:
         let mut out=std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|_|"无法创建安装包")?;
         let mut res=crate::net::get_scoped(&c.url,Duration::from_secs(180),Some("application/octet-stream"),None,Some(download_host)).await?;
         if !res.status().is_success() || !download_host(res.url()) {return Err("拒绝非 GitHub 发布文件".into());}
-        let mut hasher=Sha256::new();
-        let mut total=0u64;
+        let mut verifier=VerifiedStream::new(c.size,&c.digest)?;
         tokio::time::timeout(Duration::from_secs(180),async {
             while let Some(chunk)=res.chunk().await.map_err(|_|"安装包传输中断")? {
-                total=total.checked_add(chunk.len() as u64).ok_or("文件过大")?;
-                if total>c.size || total>MAX_BYTES {return Err("文件大小与发布信息不一致");}
-                hasher.update(&chunk);
-                out.write_all(&chunk).map_err(|_|"写入安装包失败")?;
-                RECEIVED.store(total,Ordering::Relaxed);
+                let received=verifier.write_chunk(&mut out,&chunk)?;
+                RECEIVED.store(received,Ordering::Relaxed);
             }
             Ok::<(),&str>(())
         }).await.map_err(|_|"下载超时")??;
         VERIFYING.store(true,Ordering::Relaxed);
-        if total!=c.size || format!("{:x}",hasher.finalize())!=c.digest {return Err("安装包 SHA-256 或大小校验失败，已删除临时文件".into());}
+        let total=verifier.finish()?;
         out.sync_all().map_err(|_|"保存安装包失败")?;
         drop(out);
         // Mark as downloaded, not trusted. Never remove quarantine or change Gatekeeper.

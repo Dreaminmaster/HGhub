@@ -27,3 +27,13 @@ jobs:
       - run: pnpm exec tsc --project tsconfig.tests.json
       - run: pnpm exec playwright-core install --with-deps chromium
       - run: node scripts/test-maintenance.mjs
+  integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify shared Rust download integrity code with inert fixtures
+        run: cargo test --manifest-path tests/update-integrity/Cargo.toml

@@ -23,3 +23,6 @@ No scheduled jobs, automatic code imports, new publication, security-policy exce
 
 ## Boundary regression follow-up
 The UI now rejects malformed or unknown update metadata, clears stale successful check times on new checks, and prevents a download during a check. The fixture covers no eligible release, current version, invalid digest, unknown status and persisted preference reload. These changes are limited to the local UI acceptance branch. Native HTTP timeouts, native byte-stream integrity, actual macOS installation and release authorization remain separate gates. Latest passing evidence before this follow-up: run 45621484879.
+
+## Native integrity isolation
+The native download path now uses the shared Rust VerifiedStream module. An independent Cargo fixture imports that exact module, not a reimplementation, and tests chunked writes, changed bytes, truncation, oversized chunks, malformed metadata and a writer failure. It never requests a content service, downloads an installer, invokes the OS installer or builds the application. The dedicated CI job checks the shared module; the updated native call site still needs authorized integrated macOS validation. Previous UI run 45622651394 passed. No package publication is enabled.
