@@ -232,12 +232,24 @@ mod native {
                     }
                     {
                         let mut state = RUNNING.lock().map_err(|_| "WARP 进程锁失败")?;
+                        if EXITING.load(Ordering::Acquire) {
+                            let _ = child.start_kill();
+                            return Err("应用正在退出".into());
+                        }
+                        // Publish while holding the lifecycle lock. Exit clears the
+                        // port after acquiring this same lock.
                         state.child = Some(child);
                         state.port = Some(port);
                         state.transport = Some(if use_http2 { "HTTP/2-TCP" } else { "MASQUE-QUIC" });
+                        hghub_hpp::proxy::set_warp_port(Some(port));
                     }
-                    hghub_hpp::proxy::set_warp_port(Some(port));
-                    if let Err(error) = hghub_hpp::proxy::set("warp", "") {
+                    if restoring {
+                        // The saved mode is already warp. Never override a new user selection.
+                        if hghub_hpp::proxy::mode() != hghub_hpp::proxy::Mode::Warp {
+                            shutdown();
+                            return Ok(status(&app));
+                        }
+                    } else if let Err(error) = hghub_hpp::proxy::set("warp", "") {
                         shutdown();
                         return Err(error);
                     }
@@ -264,9 +276,9 @@ mod native {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 if hghub_hpp::proxy::mode() == hghub_hpp::proxy::Mode::Warp {
                     let _ = proxy_url();
-                } else if START.try_lock().is_ok() {
-                    // Other modes explicitly selected: retire the helper, not the preference.
-                    shutdown();
+                } else if let Ok(_guard) = START.try_lock() {
+                    // Hold the startup lock while stopping the helper.
+                    if hghub_hpp::proxy::mode() != hghub_hpp::proxy::Mode::Warp { shutdown(); }
                 }
             }
         });

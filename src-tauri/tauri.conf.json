@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "HGhub HPP Preview",
+  "productName": "HGhub HPP WARP Preview",
   "version": "0.0.5",
-  "identifier": "com.dreaminmaster.hghub.hpppreview",
+  "identifier": "com.dreaminmaster.hghub.hppwarppreview",
   "build": {
     "beforeDevCommand": "node scripts/sync-android-network.mjs && pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "HGhub HPP Preview",
+        "title": "HGhub HPP WARP Preview",
         "width": 1200,
         "height": 780,
         "minWidth": 900,

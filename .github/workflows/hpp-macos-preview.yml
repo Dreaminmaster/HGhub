@@ -74,9 +74,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/HGhub HPP Preview.app"
+          APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/HGhub HPP WARP Preview.app"
           test -d "$APP"
-          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Contents/Info.plist")" = "com.dreaminmaster.hghub.hpppreview"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Contents/Info.plist")" = "com.dreaminmaster.hghub.hppwarppreview"
           EXEC=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$APP/Contents/Info.plist")
           lipo "$APP/Contents/MacOS/$EXEC" -verify_arch x86_64 arm64
           codesign --verify "$APP"
@@ -86,13 +86,13 @@ jobs:
           lipo "$HELPER" -verify_arch x86_64 arm64
           codesign --verify "$HELPER"
           mkdir -p artifacts
-          tar -czf artifacts/HGhub_HPP_Preview.app.tar.gz -C "$(dirname "$APP")" "$(basename "$APP")"
+          tar -czf artifacts/HGhub_HPP_WARP_Preview.app.tar.gz -C "$(dirname "$APP")" "$(basename "$APP")"
           STAGE="$(mktemp -d "$RUNNER_TEMP/hghub-hpp-dmg.XXXXXX")"
           trap 'rm -rf "$STAGE"' EXIT
           ditto "$APP" "$STAGE/$(basename "$APP")"
           ln -s /Applications "$STAGE/Applications"
-          DMG="$PWD/artifacts/HGhub_HPP_Preview_universal.dmg"
-          hdiutil create -ov -srcfolder "$STAGE" -volname "HGhub HPP Preview" -format UDZO "$DMG"
+          DMG="$PWD/artifacts/HGhub_HPP_WARP_Preview_universal.dmg"
+          hdiutil create -ov -srcfolder "$STAGE" -volname "HGhub HPP WARP Preview" -format UDZO "$DMG"
           hdiutil verify "$DMG"
           test -s "$DMG"
       - uses: actions/upload-artifact@v4
