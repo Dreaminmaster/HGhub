@@ -574,9 +574,10 @@ impl PluginManager {
             None => None,
         };
         if let Some(old) = old_guard.as_mut() {
-            if let Some(w) = old.worker.take() {
+            if let Some(w) = &old.worker {
                 w.stop_and_wait().await?;
             }
+            old.worker = None;
         }
         let mut p = Self::installed(dir.clone(), entry, self.strict, self.cooldown.clone())?;
         if let Some(old) = old_guard.as_ref() {
@@ -639,10 +640,11 @@ impl PluginManager {
         let p = self.get(id).await?;
         let info = {
             let mut p = p.lock().await;
-            p.entry.enabled = enabled;
-            if let Some(w) = p.worker.take() {
-                w.stop();
+            if let Some(w) = &p.worker {
+                w.stop_and_wait().await?;
             }
+            p.worker = None;
+            p.entry.enabled = enabled;
             self.sessions.release_plugin(id);
             p.error = None;
             if enabled {
@@ -659,10 +661,13 @@ impl PluginManager {
         let _mutation = self.mutation.lock().await;
         let p = self.get(id).await?;
         {
-            let p = p.lock().await;
+            let mut p = p.lock().await;
             if let Some(w) = &p.worker {
-                w.stop();
+                w.stop_and_wait().await?;
             }
+            p.worker = None;
+            // Calls that already obtained this Arc must not revive a removed plugin.
+            p.retired = true;
             self.sessions.release_plugin(id);
         }
         self.plugins.write().await.remove(id);
@@ -799,11 +804,12 @@ impl PluginManager {
                 .find(|s| s["key"] == key)
                 .ok_or_else(|| PluginError::invalid("未知设置 key"))?;
             model::validate_setting(s, &value)?;
+            if let Some(w) = &p.worker {
+                w.stop_and_wait().await?;
+            }
+            p.worker = None;
             p.entry.settings.insert(key, value);
             self.sessions.release_plugin(id);
-            if let Some(w) = p.worker.take() {
-                w.stop();
-            }
             if let Err(e) = self.initialize(&mut p, true).await {
                 p.error = Some(e);
             }
@@ -830,12 +836,13 @@ impl PluginManager {
         let plugin = self.get(id).await?;
         let info = {
             let mut p = plugin.lock().await;
+            if let Some(w) = &p.worker {
+                w.stop_and_wait().await?;
+            }
+            p.worker = None;
             p.entry.endpoint = selected;
             p.revision = uuid::Uuid::new_v4().to_string();
             self.sessions.release_plugin(id);
-            if let Some(w) = p.worker.take() {
-                w.stop();
-            }
             if let Err(e) = self.initialize(&mut p, false).await {
                 p.error = Some(e);
             }
@@ -875,5 +882,36 @@ impl Drop for PluginManager {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_regression {
+    use super::*;
+
+    #[tokio::test]
+    async fn lifecycle_mutations_stop_workers_and_retire_removed_plugins() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = PluginManager::with_mode(dir.path().to_path_buf(), Some(false)).unwrap();
+        let id = "fixture.manager-lifecycle";
+        let code = r#"export const meta={id:'fixture.manager-lifecycle',name:'Lifecycle',version:'1.0.0',protocol:1};export default hg=>({media:{getDetail(){},resolvePlayback(){}}});"#;
+        let installed = manager.import_code(code.to_owned(), None, false).await.unwrap();
+        assert_eq!(installed.status, "ready");
+        let stale = manager.get(id).await.unwrap();
+        let first = stale.lock().await.worker.as_ref().unwrap().clone();
+        assert_eq!(manager.set_enabled(id, false).await.unwrap().status, "disabled");
+        assert!(first.closed(), "disable must wait for runtime exit");
+        assert_eq!(manager.set_enabled(id, true).await.unwrap().status, "ready");
+        let second = stale.lock().await.worker.as_ref().unwrap().clone();
+        assert!(!second.closed());
+        manager.remove(id).await.unwrap();
+        assert!(second.closed(), "remove must wait for runtime exit");
+        let mut old = stale.lock().await;
+        assert!(old.retired);
+        assert!(old.worker.is_none());
+        let error = manager.initialize(&mut old, true).await.err().unwrap();
+        assert_eq!(error.code, "CANCELLED");
+        assert!(manager.get(id).await.is_err());
+        assert!(!dir.path().join(id).exists());
     }
 }
