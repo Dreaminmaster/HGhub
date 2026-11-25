@@ -832,6 +832,9 @@ impl Worker {
         budget: Duration,
         user_auth: bool,
     ) -> Result<Transfer> {
+        if let Some(error) = self.fault() {
+            return Err(error);
+        }
         params.validate(8 * 1024 * 1024)?;
         let permit = self
             .slots
@@ -871,10 +874,12 @@ impl Worker {
             .is_err()
         {
             self.tokens.lock().unwrap().remove(&id);
-            return Err(PluginError::new("RATE_LIMITED", "插件调用不可用"));
+            return Err(self.fault().unwrap_or_else(|| {
+                PluginError::new("RATE_LIMITED", "插件调用不可用")
+            }));
         }
-        receive
-            .await
-            .map_err(|_| PluginError::internal("插件运行时已停止"))?
+        receive.await.map_err(|_| {
+            self.fault().unwrap_or_else(|| PluginError::internal("插件运行时已停止"))
+        })?
     }
 }
