@@ -1,5 +1,6 @@
 mod commands;
 mod logging;
+mod warp;
 #[cfg(target_os = "macos")]
 mod macos_titlebar;
 mod network_policy;
@@ -55,6 +56,7 @@ pub fn run() {
             std::fs::create_dir_all(&dir)?;
             network_policy::bind_security(&dir);
             hghub_hpp::proxy::bind(&dir);
+            warp::restore(app.handle().clone());
             app.manage(plugins::PluginHost::new(dir.join("hpp")));
             // The WebView registers its playback capabilities before the first
             // plugin command; eager initialization would expose an incorrect env.
@@ -71,8 +73,14 @@ pub fn run() {
             commands::set_orientation,
             commands::debug_log,
             commands::open_url,
-            commands::open_external_media
+            commands::open_external_media,
+            warp::warp_status,
+            warp::warp_enable,
+            warp::warp_disable
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running HGhub");
+        .build(tauri::generate_context!())
+        .expect("error while building HGhub")
+        .run(|_app, event| {
+            if matches!(event, tauri::RunEvent::Exit) { warp::exit(); }
+        });
 }

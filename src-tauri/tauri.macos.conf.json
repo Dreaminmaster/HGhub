@@ -29,6 +29,10 @@
     ],
     "macOS": {
       "signingIdentity": "-"
-    }
+    },
+    "resources": [
+      "resources/usque",
+      "resources/LICENSE-usque.txt"
+    ]
   }
 }

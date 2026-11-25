@@ -1,8 +1,8 @@
-name: HPP macOS preview (no release)
+name: HPP WARP macOS preview (no release)
 on:
   workflow_dispatch:
   push:
-    branches: ["next/hpp-macos-0.0.5"]
+    branches: ["next/hpp-warp-macos"]
 permissions:
   contents: read
 concurrency:
@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   preview:
-    if: github.ref == 'refs/heads/next/hpp-macos-0.0.5'
+    if: github.ref == 'refs/heads/next/hpp-warp-macos'
     runs-on: macos-15-intel
     timeout-minutes: 60
     steps:
@@ -32,10 +32,42 @@ jobs:
             src-tauri/crates/hpp -> target
           key: hpp-preview-macos
       - run: pnpm install --frozen-lockfile
+      - name: 安装 Go 用于构建内置 WARP
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.3'
+          cache: false
+
+      - name: 编译固定版本 usque (macOS Universal)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v4.2.1 \
+            https://github.com/Diniboy1123/usque.git "$RUNNER_TEMP/usque"
+          test "$(git -C "$RUNNER_TEMP/usque" rev-parse HEAD)" = "6aa03fc97d12848dce34eedbd187fb1077b5d1ea"
+          mkdir -p src-tauri/resources
+          (
+            cd "$RUNNER_TEMP/usque"
+            CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
+              -o "$GITHUB_WORKSPACE/src-tauri/resources/usque_amd64" .
+            CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" \
+              -o "$GITHUB_WORKSPACE/src-tauri/resources/usque_arm64" .
+          )
+          lipo -create -output src-tauri/resources/usque \
+            src-tauri/resources/usque_amd64 src-tauri/resources/usque_arm64
+          lipo -info src-tauri/resources/usque
+          chmod 755 src-tauri/resources/usque
+          codesign --force --sign - --timestamp=none src-tauri/resources/usque
+          cp "$RUNNER_TEMP/usque/LICENSE.md" src-tauri/resources/LICENSE-usque.txt
+          shasum -a 256 src-tauri/resources/usque
+          # The final application bundles resources/usque (not the temporary arch files).
+
       - name: Build frontend
         run: pnpm build
       - name: Test plugin host
         run: cargo test --locked --manifest-path src-tauri/crates/hpp/Cargo.toml
+      - name: Test native WARP integration (no registration)
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
       - name: Build independent Universal preview
         run: pnpm tauri build --config src-tauri/tauri.macos.conf.json --target universal-apple-darwin --bundles app
       - name: Verify bundle identity and architecture
@@ -48,6 +80,11 @@ jobs:
           EXEC=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$APP/Contents/Info.plist")
           lipo "$APP/Contents/MacOS/$EXEC" -verify_arch x86_64 arm64
           codesign --verify "$APP"
+          HELPER="$APP/Contents/Resources/resources/usque"
+          test -x "$HELPER"
+          test -f "$APP/Contents/Resources/resources/LICENSE-usque.txt"
+          lipo "$HELPER" -verify_arch x86_64 arm64
+          codesign --verify "$HELPER"
           mkdir -p artifacts
           tar -czf artifacts/HGhub_HPP_Preview.app.tar.gz -C "$(dirname "$APP")" "$(basename "$APP")"
           STAGE="$(mktemp -d "$RUNNER_TEMP/hghub-hpp-dmg.XXXXXX")"
@@ -60,7 +97,7 @@ jobs:
           test -s "$DMG"
       - uses: actions/upload-artifact@v4
         with:
-          name: HGhub-HPP-Preview-universal
+          name: HGhub-HPP-WARP-Preview-universal
           path: artifacts/*
           if-no-files-found: error
           retention-days: 14

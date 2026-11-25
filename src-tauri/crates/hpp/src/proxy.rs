@@ -14,6 +14,7 @@ pub enum Mode {
     System,
     Custom,
     Off,
+    Warp,
 }
 
 impl Mode {
@@ -22,6 +23,7 @@ impl Mode {
             Self::System => "system",
             Self::Custom => "custom",
             Self::Off => "off",
+            Self::Warp => "warp",
         }
     }
 
@@ -30,6 +32,7 @@ impl Mode {
             "system" | "auto" | "" => Ok(Self::System),
             "custom" | "manual" => Ok(Self::Custom),
             "off" | "none" | "direct" => Ok(Self::Off),
+            "warp" => Ok(Self::Warp),
             _ => Err("代理模式无效".into()),
         }
     }
@@ -117,6 +120,18 @@ impl State {
     }
 }
 
+// Only the native host may publish a verified, live loopback port. Never persist it.
+static WARP_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+pub fn set_warp_port(port: Option<u16>) {
+    let next = port.unwrap_or(0);
+    let previous = WARP_PORT.swap(next, std::sync::atomic::Ordering::AcqRel);
+    if previous != next { GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel); }
+}
+fn warp_proxy() -> Result<String, String> {
+    let port = WARP_PORT.load(std::sync::atomic::Ordering::Acquire);
+    if port == 0 { return Err("内置 WARP 尚未连接；未自动改用直连".into()); }
+    Ok(format!("http://127.0.0.1:{port}"))
+}
 static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub(crate) fn generation() -> u64 { GENERATION.load(std::sync::atomic::Ordering::Acquire) }
 
@@ -144,6 +159,7 @@ pub fn bind(dir: &Path) {
 }
 
 pub fn set(mode: &str, url: &str) -> Result<Value, String> {
+    if Mode::parse(mode)? == Mode::Warp { warp_proxy()?; }
     let mut state = STATE.write().map_err(|_| "代理设置锁失败")?;
     let previous = state.config.clone();
     state.set(mode, url)?;
@@ -162,6 +178,7 @@ pub(crate) fn configure(builder: reqwest::ClientBuilder, config: &Config) -> Res
     let explicit = match config.mode {
         Mode::Off => return Ok(builder.no_proxy()),
         Mode::Custom => Some(config.url.clone()),
+        Mode::Warp => Some(warp_proxy()?),
         Mode::System => std::env::var("HGHUB_PROXY").ok().filter(|s| !s.trim().is_empty())
             .or_else(platform_proxy),
     };
@@ -339,6 +356,14 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_warp_mode_without_runtime_port_never_routes_direct() {
+        let config = Config::decode(r#"{"mode":"warp","url":""}"#);
+        assert_eq!(config.mode, Mode::Warp);
+        assert!(configure(reqwest::Client::builder(), &config).is_err());
+        assert!(Config::for_test("warp", "").is_ok());
+    }
 
     #[tokio::test]
     async fn custom_routes_through_proxy_and_direct_removes_preconfigured_proxy() {
