@@ -156,6 +156,8 @@ pub fn run() {
             api::check_update,
             updates::manual_update_check,
             updates::manual_update_download,
+            updates::manual_update_progress,
+            updates::maintenance_upstreams,
             api::open_url,
             api::set_orientation,
             api::api_login,

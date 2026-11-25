@@ -149,6 +149,8 @@ export const api = {
   checkUpdate: () => call<UpdateInfo>("check_update"),
   manualUpdateCheck: (channel: "stable" | "beta") => call<ManualUpdateInfo>("manual_update_check", { channel }),
   manualUpdateDownload: (channel: "stable" | "beta", version: string, digest: string) => call<DownloadedUpdate>("manual_update_download", { channel, version, digest }),
+  manualUpdateProgress: () => invoke<UpdateProgress>("manual_update_progress"),
+  maintenanceUpstreams: () => call<UpstreamReport>("maintenance_upstreams"),
   openUrl: (url: string) => call<void>("open_url", { url }),
 };
 
@@ -156,6 +158,8 @@ export const api = {
 
 export type ManualUpdateInfo = { status: string; version?: string; notes?: string; size?: number; digest?: string };
 export type DownloadedUpdate = { path: string; size: number; sha256: string; revealed: boolean };
+export type UpdateProgress = { busy: boolean; received: number; total: number; verifying: boolean };
+export type UpstreamReport = { checked_at_utc?: string; items: { repo: string; baseline: string; latest?: string; status: "newer" | "not_newer" | "unavailable" }[] };
 
 export type UpdateInfo = {
   current: string;

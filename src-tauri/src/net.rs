@@ -526,6 +526,17 @@ pub async fn get(
     accept: Option<&str>,
     referer: Option<&str>,
 ) -> Result<reqwest::Response, String> {
+    get_scoped(raw, timeout, accept, referer, None).await
+}
+
+/// Optional fixed destination policy, checked before every request including redirects.
+pub async fn get_scoped(
+    raw: &str,
+    timeout: Duration,
+    accept: Option<&str>,
+    referer: Option<&str>,
+    allow: Option<fn(&url::Url) -> bool>,
+) -> Result<reqwest::Response, String> {
     tokio::time::timeout(timeout, async {
         let policy_error = |phase: &str, error: String| {
             crate::playback_log::record("network.target_failed", json!({"resource": crate::playback_log::resource_id(raw), "phase": phase, "error_kind": crate::playback_log::error_kind(&error)}));
@@ -533,6 +544,9 @@ pub async fn get(
         };
         let mut next = network_policy::parse_target(raw).map_err(|e| policy_error("parse", e))?;
         for hop in 0..=5 {
+            if allow.is_some_and(|check| !check(&next)) {
+                return Err("请求目标不在允许的更新服务器范围内".into());
+            }
             let resolving = Instant::now();
             let (target, http) = client_for(next.as_str()).await.map_err(|e| policy_error("dns_or_client", e))?;
             crate::playback_log::record("network.target_ready", json!({"resource": crate::playback_log::resource_id(raw), "target_resource": crate::playback_log::resource_id(target.as_str()), "dns_or_client_ms": resolving.elapsed().as_millis() as u64, "hop": hop}));
