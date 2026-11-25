@@ -100,5 +100,16 @@ async fn consecutive_runtime_fault_is_visible_before_third_error_reply() {
             assert!(worker.fault().is_some(), "terminal state must precede the third reply");
         }
     }
+    let terminal = worker.fault().expect("terminal fault");
+    // The failure remains attributable even as the worker thread closes.
+    let rejected = tokio::time::timeout(Duration::from_secs(2),
+        invoke("post-fault".to_owned(), "media.resolvePlayback"))
+        .await.unwrap().err().expect("terminal runtime must reject new calls");
+    assert_eq!(rejected.code, terminal.code);
+    assert_eq!(rejected.message, terminal.message);
     worker.stop_and_wait().await.unwrap();
+    let rejected_after_close = invoke("post-close".to_owned(), "media.resolvePlayback")
+        .await.err().expect("closed terminal runtime must reject new calls");
+    assert_eq!(rejected_after_close.code, terminal.code);
+    assert_eq!(rejected_after_close.message, terminal.message);
 }
