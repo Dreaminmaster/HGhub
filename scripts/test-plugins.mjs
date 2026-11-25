@@ -120,7 +120,11 @@ try {
   await page.waitForFunction(() => document.querySelector(".legacy-search-poster img")?.naturalWidth > 0);
   await page.screenshot({ path: join(output, "library-dark.png") });
   await page.evaluate(() => document.documentElement.classList.add("theme-light")); await page.screenshot({ path: join(output, "library-light.png") }); await page.evaluate(() => document.documentElement.classList.remove("theme-light"));
-  await page.getByRole("button", { name: /合成影像/ }).click(); await page.waitForFunction(() => document.querySelector('video')?.currentTime > 0.2);
+  await page.getByRole("button", { name: /合成影像/ }).click();
+  // Search results intentionally open details before playback; mirror a real user action.
+  await page.getByRole("dialog", { name: "作品详情" }).getByRole("button", { name: "立即播放", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('video')?.currentTime > 0.2);
+  report.passed.push("Search opens details, explicit play starts decoded video");
   await chooseEpisode(page, '普通视频'); await page.waitForFunction(() => document.querySelector("video")?.currentTime > 0.5);
   await page.evaluate(() => { document.querySelector("video").currentTime = 3; }); await page.waitForFunction(() => document.querySelector("video")?.currentTime > 3.2);
   await page.getByLabel("源播放流", { exact: true }).selectOption("1");
@@ -210,6 +214,7 @@ try {
   await page.getByRole("heading", { name: "虚构推荐本地虚构影院" }).waitFor();
   report.passed.push("Home more opens a separate section list, returns to home, and endpoint probe/refresh are user-triggered");
   await page.getByRole("button", { name: /合成影像/ }).click();
+  await page.getByRole("dialog", { name: "作品详情" }).getByRole("button", { name: /^(立即播放|继续)/ }).click();
   await chooseEpisode(page, '普通视频');
   await page.waitForFunction(() => document.querySelector('video')?.currentTime > 0.5);
   await page.getByRole("button", { name: "本地收藏", exact: true }).click();
@@ -493,7 +498,16 @@ try {
   assert.deepEqual(errors, []); assert.deepEqual(report.external, []); assert(upstream.every(r => r.url === "/" || r.token === "local-fixture"));
   await writeFile(join(output, "upstream.json"), JSON.stringify(upstream, null, 2));
 } catch (e) {
-  report.error = String(e.stack || e); process.exitCode = 1; console.error(report.error); await page?.screenshot({ path: join(output, "failure.png") }).catch(() => {});
+  report.error = String(e.stack || e); process.exitCode = 1; console.error(report.error);
+  // Record browser state for local synthetic tests without including media URLs or tokens.
+  if (page) {
+    report.failureState = await page.evaluate(() => ({
+      dialogs: [...document.querySelectorAll('[role="dialog"],dialog[open]')].map(d => d.getAttribute("aria-label") || d.querySelector("h2")?.textContent || ""),
+      alerts: [...document.querySelectorAll('[role="alert"]')].map(d => d.textContent?.slice(0, 300)),
+      videos: [...document.querySelectorAll("video")].map(v => ({ readyState: v.readyState, networkState: v.networkState, currentTime: v.currentTime, duration: v.duration, paused: v.paused, errorCode: v.error?.code ?? null })),
+    })).catch(() => null);
+    await page.screenshot({ path: join(output, "failure.png") }).catch(() => {});
+  }
 } finally {
   await writeFile(join(output, "report.json"), JSON.stringify(report, null, 2)); await browser?.close(); await vite?.close(); server?.closeAllConnections(); await new Promise(resolve => server ? server.close(resolve) : resolve()); host?.kill();
   assert(resolve(data).startsWith(resolve(tmpdir()) + sep) && basename(data).startsWith("hghub-hpp-"), "Refuse cleanup outside the generated fixture directory");
