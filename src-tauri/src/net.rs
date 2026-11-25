@@ -283,18 +283,6 @@ fn effective_proxy(config: &ProxySettings) -> Option<String> {
     }
 }
 
-/// Update traffic respects the selected app proxy. No direct fallback from WARP.
-#[cfg(target_os = "macos")]
-pub fn updater_proxy() -> Result<(bool, Option<url::Url>), String> {
-    let config = PROXY_SETTINGS.read().map_err(|_| "读取网络设置失败")?.clone();
-    let proxy = effective_proxy(&config);
-    if config.mode == "warp" && proxy.is_none() {
-        return Err("WARP 尚未连接，请先检查网络设置".into());
-    }
-    let parsed = proxy.map(|p| url::Url::parse(&p).map_err(|_| "更新代理地址无效")).transpose()?;
-    Ok((config.mode == "direct", parsed))
-}
-
 /// 按**当前**系统代理设置新建一个客户端。
 ///
 /// 注意：reqwest 的 `system-proxy` 只在构建时读一次注册表 / 环境变量。代理软件被关掉后，

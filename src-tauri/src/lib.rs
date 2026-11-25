@@ -55,8 +55,6 @@ pub fn run() {
         )
         .manage(Api::new())
         .setup(|app| {
-            #[cfg(target_os = "macos")]
-            updates::register(app.handle())?;
             if let Ok(dir) = app.path().app_data_dir() {
                 let _ = std::fs::create_dir_all(&dir);
                 // 上次选择的线路（设置 → 线路）在启动时恢复
@@ -156,8 +154,8 @@ pub fn run() {
             api::line_mirrors,
             api::line_probe,
             api::check_update,
-            updates::signed_update_check,
-            updates::signed_update_install,
+            updates::manual_update_check,
+            updates::manual_update_download,
             api::open_url,
             api::set_orientation,
             api::api_login,
