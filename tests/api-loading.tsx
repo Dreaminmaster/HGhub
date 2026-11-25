@@ -42,7 +42,7 @@ Object.assign(window, {
     if (cmd === "net_diag") {
       const result = {
         http: { status: 200 }, api: { ok: false, status: 503, error_kind: "http_error" },
-        proxy: { mode: "warp", warp_running: true },
+        proxy: { mode: "warp", warp_running: true, warp_egress: { ok: true } },
         backup: { origin: "https://fixture.invalid", api: { ok: false, status: 502 } },
       };
       if (!fixture.diagnosticDelay) return Promise.resolve(result);

@@ -40,7 +40,22 @@ try {
   await complete("api_feed", "", "503");
   await visible(page.getByText(/内容服务暂不可用（HTTP 503）/).first());
   await page.getByRole("button", { name: "检测连接", exact: true }).click();
-  await visible(page.getByRole("status").filter({ hasText: "内置 WARP；网页 HTTP 200；内容接口 HTTP 503；备用线路：HTTP 502" }));
+  await visible(page.getByRole("status").filter({ hasText: "内置 WARP（实时出口已验证）；网页 HTTP 200；内容接口 HTTP 503；备用线路：HTTP 502" }));
+  const egressLabels = await page.evaluate(async () => {
+    const { describeNetworkDiagnostic } = await import("/src/api.ts");
+    const base = { http: {status: 200}, api: {ok: false, status: 503} };
+    return [
+      {mode: "warp", warp_running: true, warp_egress: {ok: true}},
+      {mode: "warp", warp_running: true, warp_egress: {ok: false}},
+      {mode: "warp", warp_running: false, warp_egress: {ok: false}},
+      {mode: "warp", warp_running: true}
+    ].map(proxy => describeNetworkDiagnostic({...base, proxy}));
+  });
+  assert(egressLabels[0].includes("实时出口已验证") && egressLabels[0].includes("内容服务返回 503"));
+  assert(egressLabels[1].includes("实时出口未通过"));
+  assert(egressLabels[2].includes("本地组件未运行"));
+  assert(egressLabels[3].includes("出口未验证"));
+  report.passed.push("Network diagnostic distinguishes verified egress, failed egress, stopped helper and missing verification");
   await page.evaluate(() => { window.apiLoadingFixture.diagnosticDelay = true; });
   await page.getByRole("button", { name: "检测连接", exact: true }).click();
   await page.waitForFunction(() => window.apiLoadingFixture.finishDiagnostic !== null);

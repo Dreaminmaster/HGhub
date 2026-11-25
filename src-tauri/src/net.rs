@@ -526,6 +526,17 @@ pub async fn get(
     accept: Option<&str>,
     referer: Option<&str>,
 ) -> Result<reqwest::Response, String> {
+    get_scoped(raw, timeout, accept, referer, None).await
+}
+
+/// Optional fixed destination policy, checked before every request including redirects.
+pub async fn get_scoped(
+    raw: &str,
+    timeout: Duration,
+    accept: Option<&str>,
+    referer: Option<&str>,
+    allow: Option<fn(&url::Url) -> bool>,
+) -> Result<reqwest::Response, String> {
     tokio::time::timeout(timeout, async {
         let policy_error = |phase: &str, error: String| {
             crate::playback_log::record("network.target_failed", json!({"resource": crate::playback_log::resource_id(raw), "phase": phase, "error_kind": crate::playback_log::error_kind(&error)}));
@@ -533,6 +544,9 @@ pub async fn get(
         };
         let mut next = network_policy::parse_target(raw).map_err(|e| policy_error("parse", e))?;
         for hop in 0..=5 {
+            if allow.is_some_and(|check| !check(&next)) {
+                return Err("请求目标不在允许的更新服务器范围内".into());
+            }
             let resolving = Instant::now();
             let (target, http) = client_for(next.as_str()).await.map_err(|e| policy_error("dns_or_client", e))?;
             crate::playback_log::record("network.target_ready", json!({"resource": crate::playback_log::resource_id(raw), "target_resource": crate::playback_log::resource_id(target.as_str()), "dns_or_client_ms": resolving.elapsed().as_millis() as u64, "hop": hop}));
@@ -652,19 +666,38 @@ fn dns_summary(addrs: impl IntoIterator<Item = SocketAddr>) -> Value {
 /// One anonymous, bounded, read-only legacy API check, with no fallback or retries.
 pub async fn probe_content(origin: &str) -> Value {
     let started = Instant::now();
+    let response_meta = Mutex::new(Value::Null);
     let result = tokio::time::timeout(
         Duration::from_secs(12),
-        edge_once(origin, "GET", "/api/videos?page=1&size=1", None, None, false),
+        edge_once(origin, "GET", "/api/videos?page=1&size=1", None, None, false, Some(&response_meta)),
     ).await;
     let ms = started.elapsed().as_millis() as u64;
-    match result {
+    let mut diagnostic = match result {
         Ok(Ok(value)) if valid_feed(&value) => json!({"ok":true,"ms":ms}),
         Ok(Ok(_)) => json!({"ok":false,"ms":ms,"error_kind":"unexpected_feed_format"}),
         Ok(Err(error)) => json!({"ok":false,"ms":ms,
             "error_kind":crate::playback_log::error_kind(&error),
             "status":http_error_status(&error)}),
         Err(_) => json!({"ok":false,"ms":ms,"error_kind":"timeout"}),
-    }
+    };
+    diagnostic["response"] = response_meta.into_inner().unwrap_or(Value::Null);
+    diagnostic
+}
+
+// Export only bounded, classified response metadata; never raw headers or bodies.
+fn diagnostic_response(headers: &reqwest::header::HeaderMap, status: u16) -> Value {
+    let content_type = headers.get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();
+    let cf_error = headers.get("cf-error-type").and_then(|v| v.to_str().ok())
+        .filter(|v| (3..=4).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_digit()));
+    let cf_generated = status >= 400 && (cf_error.is_some() || headers.contains_key("cf-error-origin"));
+    json!({
+        "status": status,
+        "format": if content_type.contains("json") { "json" } else if content_type.contains("html") { "html" } else { "other" },
+        "gateway": if headers.contains_key("x-amz-cf-id") { "cloudfront" } else if headers.contains_key("cf-ray") { "cloudflare" } else { "unknown" },
+        "cloudflare_generated_error": cf_generated,
+        "cloudflare_error_type": cf_error,
+    })
 }
 
 fn valid_feed(value: &Value) -> bool {
@@ -686,7 +719,8 @@ pub async fn diagnose() -> Value {
     } else {
         None
     };
-    let (dns, http, api_check, backup_check) = tokio::join!(
+    let warp_url_before = if mode_before["mode"] == "warp" { crate::warp::proxy_url() } else { None };
+    let (dns, http, api_check, backup_check, warp_egress) = tokio::join!(
         async {
             match tokio::time::timeout(
                 Duration::from_secs(4),
@@ -711,10 +745,17 @@ pub async fn diagnose() -> Value {
             } else {
                 Value::Null
             }
+        },
+        async {
+            if mode_before["mode"] == "warp" {
+                crate::warp::diagnose_egress().await
+            } else {
+                Value::Null
+            }
         }
     );
     let settings_changed = cur != base() || mode_before != proxy_state()
-        || warp_running.is_some_and(|running| running != crate::warp::proxy_url().is_some());
+        || (mode_before["mode"] == "warp" && warp_url_before != crate::warp::proxy_url());
 
     json!({
         "version": env!("CARGO_PKG_VERSION"),
@@ -734,6 +775,7 @@ pub async fn diagnose() -> Value {
         "proxy": {
             "mode": mode_before["mode"],
             "warp_running": warp_running,
+            "warp_egress": warp_egress,
             "address": PROXY_SETTINGS.read().ok().and_then(|p| {
                 let selected = effective_proxy(&p);
                 selected.map(|s| redact_proxy(&s))
@@ -910,14 +952,14 @@ pub async fn edge(
     body: Option<Value>,
     token: Option<&str>,
 ) -> Result<Value, String> {
-    let first = edge_once(origin, method, path, body.clone(), token, true).await;
+    let first = edge_once(origin, method, path, body.clone(), token, true, None).await;
     match first {
         Err(first_error) if may_recover_with_backup(origin, method, path, body.is_some(), token.is_some(), &first_error) => {
             let backup = automatic_backup(origin).expect("经过备用线路白名单验证");
             crate::playback_log::record("api.trusted_fallback", json!({
                 "operation": edge_operation(path), "from": origin, "to": backup,
             }));
-            match edge_once(backup, method, path, body, None, true).await {
+            match edge_once(backup, method, path, body, None, true, None).await {
                 Ok(value) => {
                     crate::playback_log::record("api.trusted_fallback_success", json!({
                         "operation": edge_operation(path), "source": backup,
@@ -948,6 +990,7 @@ async fn edge_once(
     body: Option<Value>,
     token: Option<&str>,
     allow_retry: bool,
+    diagnostic: Option<&Mutex<Value>>,
 ) -> Result<Value, String> {
     let cur = normalize_base(origin).ok_or("业务请求必须使用安全 HTTPS 线路")?;
     if network_policy::strict_security()
@@ -1025,6 +1068,11 @@ async fn edge_once(
                     let resp = req.send().await.map_err(|e| err_text(&e))?;
                     let status = resp.status();
                     status_code = Some(status.as_u16());
+                    if let Some(meta) = diagnostic {
+                        if let Ok(mut value) = meta.lock() {
+                            *value = diagnostic_response(resp.headers(), status.as_u16());
+                        }
+                    }
                     headers_ms = Some(started.elapsed().as_millis() as u64);
                     let ctype = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
                     response_kind = if ctype.contains("json") { "json" } else if ctype.contains("html") { "html" } else { "other" };
@@ -1144,6 +1192,30 @@ pub async fn fetch_bytes(url: &str) -> Result<(Option<String>, Vec<u8>), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_response_classifies_without_exporting_raw_headers() {
+        use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("Text/HTML; Charset=UTF-8"));
+        headers.insert("cf-ray", HeaderValue::from_static("private-ray"));
+        headers.insert("set-cookie", HeaderValue::from_static("secret=value"));
+        let forwarded = diagnostic_response(&headers, 503);
+        assert_eq!(forwarded["gateway"], "cloudflare");
+        assert_eq!(forwarded["format"], "html");
+        assert_eq!(forwarded["cloudflare_generated_error"], false);
+        headers.insert("cf-error-type", HeaderValue::from_static("1102"));
+        headers.insert("cf-error-origin", HeaderValue::from_static("internal-detail"));
+        let generated = diagnostic_response(&headers, 503);
+        assert_eq!(generated["cloudflare_generated_error"], true);
+        assert_eq!(generated["cloudflare_error_type"], "1102");
+        let exported = generated.to_string();
+        for private in ["private-ray", "secret=value", "internal-detail"] {
+            assert!(!exported.contains(private));
+        }
+        headers.insert("cf-error-type", HeaderValue::from_static("unexpected-private-value"));
+        assert!(diagnostic_response(&headers, 503)["cloudflare_error_type"].is_null());
+    }
 
     #[tokio::test]
     async fn unavailable_origin_is_not_retried_indefinitely() {
