@@ -10,6 +10,8 @@ mod playback_log;
 mod session;
 mod warp;
 mod updates;
+#[cfg(target_os = "macos")]
+mod update_archive;
 
 use api::Api;
 use tauri::Manager;
@@ -158,6 +160,8 @@ pub fn run() {
             updates::manual_update_download,
             updates::manual_update_progress,
             updates::maintenance_upstreams,
+            updates::manual_update_history,
+            updates::manual_update_reveal,
             api::open_url,
             api::set_orientation,
             api::api_login,

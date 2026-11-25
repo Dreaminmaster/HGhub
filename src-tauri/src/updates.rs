@@ -171,12 +171,29 @@ pub async fn manual_update_download(app:tauri::AppHandle,channel:String,version:
         let mark=std::process::Command::new("/usr/bin/xattr").args(["-w","com.apple.quarantine",&quarantine]).arg(&path).status().map_err(|_|"无法标记下载文件")?;
         if !mark.success(){return Err("无法设置下载安全标记".into());}
         let _saved=temp.keep();
+        let archived=crate::update_archive::record(&app,&path,&c.version,total,&c.digest).is_ok();
         let revealed=app.opener().reveal_item_in_dir(&path).is_ok();
-        Ok(json!({"path":path.to_string_lossy(),"size":total,"sha256":c.digest,"revealed":revealed}))
+        Ok(json!({"path":path.to_string_lossy(),"size":total,"sha256":c.digest,"revealed":revealed,"archived":archived}))
     }
     #[cfg(not(target_os="macos"))]
     {let _=(app,version,digest);Err("当前平台不支持此下载方式".into())}
 }
+/// Local download receipts only; no remote historical download or automatic downgrade.
+#[tauri::command]
+pub async fn manual_update_history(app:tauri::AppHandle)->Result<Value,String> {
+    #[cfg(target_os="macos")]
+    {tauri::async_runtime::spawn_blocking(move||crate::update_archive::history(&app)).await.map_err(|_|"读取下载记录失败".to_string())?}
+    #[cfg(not(target_os="macos"))]
+    {let _=app;Ok(json!([]))}
+}
+#[tauri::command]
+pub async fn manual_update_reveal(app:tauri::AppHandle,id:String)->Result<(),String> {
+    #[cfg(target_os="macos")]
+    {tauri::async_runtime::spawn_blocking(move||crate::update_archive::reveal(&app,&id)).await.map_err(|_|"检查本地安装包失败".to_string())?}
+    #[cfg(not(target_os="macos"))]
+    {let _=(app,id);Err("当前平台暂不支持".into())}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
