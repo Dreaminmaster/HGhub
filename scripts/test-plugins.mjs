@@ -219,7 +219,7 @@ try {
   await page.waitForFunction(() => document.querySelector('video')?.currentTime > 0.5);
   await page.getByRole("button", { name: "本地收藏", exact: true }).click();
   await page.getByRole("button", { name: "取消本地收藏", exact: true }).waitFor();
-  await playerPanel(page, "详情"); await page.getByRole("button", { name: "追更", exact: true }).click();
+  await playerPanel(page, "详情"); await page.getByRole("dialog", { name: "作品详情" }).getByRole("button", { name: "追更这部作品", exact: true }).click();
   await chooseEpisode(page, '普通视频');
   await page.waitForFunction(() => document.querySelector("video")?.currentTime > 0.5);
   await page.evaluate(() => { const video = document.querySelector("video"); video.currentTime = 2; video.pause(); });

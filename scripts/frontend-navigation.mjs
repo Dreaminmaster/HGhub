@@ -9,14 +9,42 @@ export async function openRecommendations(page, name) {
 export const installedTab = page => page.getByRole("navigation", { name: "插件中心分栏" }).getByRole("button", { name: /^已安装/ }).click();
 export const importTab = page => page.getByRole("navigation", { name: "插件中心分栏" }).getByRole("button", { name: /^导入与(列表)?订阅$/ }).click();
 
+// The restored player has a single dock, not the old tabbed panel heading.
+// Use visible controls and the current More > Quality and Lines navigation.
+async function closePlayerPanel(page) {
+  const close = page.locator('.legacy-panel-heading').getByRole('button', { name: '关闭面板', exact: true });
+  if (await close.isVisible()) await close.click();
+}
+async function wakePlayerControls(page) {
+  const video = page.locator('video').first();
+  if (await video.isVisible()) await video.hover();
+}
 export async function playerPanel(page, panel) {
-  const heading = page.locator('.legacy-panel-heading');
-  if (await heading.count()) await heading.getByRole('button', {name: panel, exact: true}).click();
-  else if (panel === '详情') await page.getByRole('button', {name: /查看详情/}).click();
-  else await page.getByRole('button', {name: panel, exact: true}).click();
+  const title = panel === '播放设置' ? '画质与线路' : panel === '详情' ? '作品详情' : panel;
+  const heading = page.locator('.legacy-panel-heading').getByRole('heading', { name: title, exact: true });
+  if (await heading.isVisible()) return;
+  if (panel === '详情' && await page.getByRole('dialog', { name: '作品详情' }).isVisible()) return;
+  await closePlayerPanel(page);
+  await wakePlayerControls(page);
+  if (panel === '播放设置') {
+    await page.getByRole('button', { name: '更多', exact: true }).click();
+    await page.getByRole('button', { name: '画质与线路', exact: true }).click();
+    await heading.waitFor();
+  } else if (panel === '详情') {
+    await page.getByRole('button', { name: /查看详情|作品详情/ }).click();
+    await page.getByRole('dialog', { name: '作品详情' }).waitFor();
+  } else {
+    await page.getByRole('button', { name: panel, exact: true }).click();
+    await heading.waitFor();
+  }
 }
 export async function chooseEpisode(page, name) {
-  await playerPanel(page, '选集');
-  await page.getByRole('button', {name, exact: true}).click();
+  const detail = page.getByRole('dialog', { name: '作品详情' });
+  if (await detail.isVisible()) {
+    await detail.getByRole('button', {name, exact: true}).click();
+  } else {
+    await playerPanel(page, '选集');
+    await page.locator('.hg-episode-picker').getByRole('button', {name, exact: true}).click();
+  }
   await playerPanel(page, '播放设置');
 }
