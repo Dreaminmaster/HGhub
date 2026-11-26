@@ -28,3 +28,5 @@ jobs:
       - name: Test standalone local backup utility
         if: runner.os == 'macOS'
         run: python3 -m unittest discover -s tests -p 'test_local_backup.py' -v
+      - name: Test generic network diagnostic
+        run: python3 -m unittest discover -s tests -p 'test_network_probe.py' -v
