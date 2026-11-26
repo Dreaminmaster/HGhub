@@ -36,7 +36,8 @@ jobs:
           APP="$BUNDLE/macos/HGhub Personal.app"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Contents/Info.plist")" = com.dreaminmaster.hghub.personal
           exe=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$APP/Contents/Info.plist")
-          lipo -verify_arch arm64 "$APP/Contents/MacOS/$exe"
+          lipo "$APP/Contents/MacOS/$exe" -verify_arch arm64
+          lipo -archs "$APP/Contents/MacOS/$exe"
           codesign --verify --deep --strict "$APP"
           test -f "$APP/Contents/Resources/maintenance/local_backup.py"
           test -f "$APP/Contents/Resources/maintenance/network_probe.py"
