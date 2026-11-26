@@ -1,0 +1,52 @@
+name: Personal HPP macOS candidate
+on:
+  push:
+    branches: ["next/hpp-macos-personal-20261126"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: personal-hpp-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  macos:
+    runs-on: macos-15-intel
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm tauri build --config src-tauri/tauri.macos.conf.json --target aarch64-apple-darwin --bundles app,dmg
+      - name: Verify independent arm64 bundle and DMG
+        run: |
+          set -euo pipefail
+          BUNDLE="src-tauri/target/aarch64-apple-darwin/release/bundle"
+          APP="$BUNDLE/macos/HGhub Personal.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Contents/Info.plist")" = com.dreaminmaster.hghub.personal
+          exe=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$APP/Contents/Info.plist")
+          lipo -verify_arch arm64 "$APP/Contents/MacOS/$exe"
+          codesign --verify --deep --strict "$APP"
+          test -f "$APP/Contents/Resources/maintenance/local_backup.py"
+          test -f "$APP/Contents/Resources/maintenance/network_probe.py"
+          test -f "$APP/Contents/Resources/maintenance/LICENSE"
+          mkdir -p artifacts
+          for dmg in "$BUNDLE"/dmg/*.dmg; do hdiutil verify "$dmg"; cp "$dmg" artifacts/; done
+          (cd artifacts; shasum -a 256 ./*.dmg > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HGhub-Personal-arm64-candidate
+          path: artifacts/*
+          retention-days: 7
+          if-no-files-found: error

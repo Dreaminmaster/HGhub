@@ -45,3 +45,22 @@ pub fn open_external_media(app: tauri::AppHandle, url: String) -> Result<(), Str
     hghub_hpp::model::url(&url, true, true).map_err(|e| e.message)?;
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
+
+// Only fixed application-owned locations; never accepts an arbitrary path or command.
+#[tauri::command]
+pub fn maintenance_open_folder(app: tauri::AppHandle, kind: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let dir = match kind.as_str() {
+            "data" => app.path().app_data_dir().map_err(|e| e.to_string())?,
+            "tools" => app.path().resource_dir().map_err(|e| e.to_string())?.join("maintenance"),
+            _ => return Err("未知维护目录".into()),
+        };
+        if !dir.is_dir() { return Err("维护目录不存在".into()); }
+        let status = std::process::Command::new("/usr/bin/open").arg(dir).status().map_err(|_| "无法打开 Finder".to_string())?;
+        if !status.success() { return Err("无法打开 Finder".into()); }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = (app, kind); Err("此维护入口仅支持 macOS".into()) }
+}

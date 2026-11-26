@@ -71,7 +71,8 @@ pub fn run() {
             commands::set_orientation,
             commands::debug_log,
             commands::open_url,
-            commands::open_external_media
+            commands::open_external_media,
+            commands::maintenance_open_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running HGhub");

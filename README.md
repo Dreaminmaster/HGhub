@@ -1,3 +1,19 @@
+# HGhub Personal（macOS 独立非商业版）
+
+基于 Minireel/HGhub 固定提交 b223ff6187369408803b2be7878ce456fceb0a7b，保留 PolyForm Noncommercial 1.0.0 及原版权声明。独立应用标识 com.dreaminmaster.hghub.personal，不覆盖旧版应用与数据。仅供非商业用途，不内置内容源或第三方插件。
+
+## 使用
+- 设置 → 维护与本地播放：直接选择自己有权使用的本地 MP4、WebM 或音频文件；是否可播放取决于系统 WebKit 支持的编码。
+- 导出/导入非敏感外观与播放偏好，导入前显示确认。收藏、账号、插件、代理和权限设置不在此偏好文件内。
+- 打开本机数据目录及随包维护工具目录。完整备份必须先退出应用，使用随包的 local_backup.py，另行备份系统 WebView 数据或使用 Time Machine；不能把应用数据目录当作全部数据。
+- 上游插件播放器保留系统/手动代理设置和用户导入插件能力。仅使用获授权来源；不包含旧版兼容代码或内置 WARP。网络诊断工具使用正常系统网络。
+- 独立版本没有正式更新渠道；原版 GitHub Release 不作为本版安装更新。构建仅在本分支自动运行，产物为候选包，不自动发布 Release。未公证，保留系统安全确认，不关闭 Gatekeeper。
+
+## 构建验收
+macOS ARM64 交叉构建、bundle identifier、签名、DMG 校验。使用本地媒体的真实界面播放和 M5 实机安装仍需验收。未承诺旧版第三方服务可用性。
+
+原项目文档：
+
 <p align="center">
   <img src="app-icon.svg" width="88" height="88" alt="HGhub 图标" />
 </p>
